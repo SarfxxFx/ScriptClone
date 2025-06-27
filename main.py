@@ -3,6 +3,7 @@
 Versão otimizada do script de transferência de álbuns do Telegram.
 - Download paralelizado de álbuns (buffer).
 - Upload paralelizado de álbuns, mas sempre mantendo a ordem cronológica (respeita ordem da fila).
+- Correção: upload só começa após todos os arquivos do álbum existirem em disco!
 """
 
 import asyncio
@@ -483,11 +484,25 @@ class TelegramAlbumTransfer:
                             await task  # Propaga exceção se houve erro
                             album.downloaded = True
                             await self.progress_tracker.save_album(album)
-                            upload_queue.append(album)
-                            self.logger.info(f"[Fila] Álbum baixado e enfileirado para upload: {album.grouped_id}")
+                            # VERIFICAÇÃO EXTRA: todos os arquivos do álbum existem?
+                            all_ok = True
+                            for media in album.medias:
+                                if not (media.local_path and os.path.exists(media.local_path)):
+                                    self.logger.error(f"Mídia {media.file_name} não foi baixada corretamente para o álbum {album.grouped_id}. Retentando...")
+                                    await self.download_media(media)
+                                    if not (media.local_path and os.path.exists(media.local_path)):
+                                        all_ok = False
+                                        break
+                            if all_ok:
+                                upload_queue.append(album)
+                                self.logger.info(f"[Fila] Álbum baixado e enfileirado para upload: {album.grouped_id}")
+                            else:
+                                self.logger.error(f"Álbum {album.grouped_id} não está completamente baixado. Nova tentativa no final da fila.")
+                                # Tenta baixar de novo ao final
+                                download_tasks[group_id] = (asyncio.create_task(self.download_album_safe(album)), album)
+                                continue
                         except Exception as e:
                             self.logger.error(f"Download de álbum {album.grouped_id} falhou: {e}")
-                            # Tenta baixar de novo ao final
                             download_tasks[group_id] = (asyncio.create_task(self.download_album_safe(album)), album)
                             continue
                         del download_tasks[group_id]
@@ -512,7 +527,6 @@ class TelegramAlbumTransfer:
 
             # Aguarda o upload mais antigo terminar, antes de liberar o próximo na ordem!
             if uploads_in_progress:
-                # Espera o menor índice (primeiro da fila dos uploads)
                 idx_to_await = min(uploads_in_progress.keys())
                 task, album = uploads_in_progress[idx_to_await]
                 await task  # Garante ordem
@@ -521,7 +535,6 @@ class TelegramAlbumTransfer:
                 next_upload_index += 1
 
     async def upload_album_with_status(self, album, idx):
-        # Garante ordem: só envia quando chamado, mas pode rodar em paralelo limitado
         try:
             await self.upload_album_corrected(album)
             album.uploaded = True
@@ -530,7 +543,6 @@ class TelegramAlbumTransfer:
             self.logger.info(f"[UPLOAD-FILA] Álbum {album.grouped_id} enviado com sucesso (posição {idx+1})")
         except Exception as e:
             self.logger.error(f"[UPLOAD-FILA] Falha ao enviar álbum {album.grouped_id} (posição {idx+1}): {e}")
-            # Retentativa simples
             await asyncio.sleep(10)
             await self.upload_album_with_status(album, idx)
 
@@ -560,6 +572,14 @@ class TelegramAlbumTransfer:
                 if isinstance(result, Exception):
                     self.logger.warning(f"Download falhou para {album.medias[idx].file_name}, re-tentando individualmente.")
                     await self.download_media(album.medias[idx])
+
+        # VERIFICAÇÃO EXTRA: garante que todos existem
+        for media in album.medias:
+            if not (media.local_path and os.path.exists(media.local_path)):
+                self.logger.error(f"Mídia {media.file_name} não foi baixada corretamente para o álbum {album.grouped_id}")
+                await self.download_media(media)
+                if not (media.local_path and os.path.exists(media.local_path)):
+                    raise RuntimeError(f"Falha persistente ao baixar {media.file_name} para álbum {album.grouped_id}")
 
     async def download_media(self, media: MediaInfo):
         async with self.download_semaphore:
