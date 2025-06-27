@@ -460,18 +460,18 @@ class TelegramAlbumTransfer:
             self.logger.info("Todos os itens já foram enviados!")
             return
 
-        # Corrigido: download e upload em sequência para cada item, respeitando a ordem
-        for idx, item in enumerate(pending_items):
-            # Download
-            if not item.downloaded:
-                self.logger.info(f"[Download] Preparando item {idx+1}/{len(pending_items)} (ID: {item.grouped_id})")
-                await self.download_album_safe(item)
-                item.downloaded = True
-                await self.progress_tracker.save_album(item)
-            # Upload
-            if not item.uploaded:
-                self.logger.info(f"[Upload] Enviando item {idx+1}/{len(pending_items)} (ID: {item.grouped_id})")
-                await self.upload_album_with_retry(item)
+        # Para cada álbum ou mídia individual: baixar todas as mídias do álbum em paralelo, depois fazer upload do álbum inteiro (mídia com legenda primeiro)
+        for idx, album in enumerate(pending_items):
+            if not album.downloaded:
+                self.logger.info(f"[Download Álbum] {idx+1}/{len(pending_items)} (ID: {album.grouped_id}) - Baixando {len(album.medias)} mídias")
+                await self.download_album_safe(album)
+                album.downloaded = True
+                await self.progress_tracker.save_album(album)
+            if not album.uploaded:
+                # Legenda na primeira mídia
+                album.medias.sort(key=lambda m: (m.caption is None, m.date))
+                self.logger.info(f"[Upload Álbum] {idx+1}/{len(pending_items)} (ID: {album.grouped_id}) - Enviando álbum")
+                await self.upload_album_with_retry(album)
 
     async def download_album_safe(self, album: AlbumInfo):
         try:
@@ -483,8 +483,7 @@ class TelegramAlbumTransfer:
             raise TimeoutError(f"Timeout baixando álbum {album.grouped_id}")
 
     async def download_album(self, album: AlbumInfo):
-        self.logger.info(f"Baixando álbum/mídia {album.grouped_id} "
-                        f"({len(album.medias)} mídias, {album.total_size / 1024 / 1024:.1f} MB)")
+        self.logger.info(f"Baixando álbum/mídia {album.grouped_id} ({len(album.medias)} mídias, {album.total_size / 1024 / 1024:.1f} MB)")
         album_dir = self.temp_dir / f"album_{album.grouped_id}"
         album_dir.mkdir(exist_ok=True)
         download_tasks = []
@@ -499,7 +498,6 @@ class TelegramAlbumTransfer:
                 if isinstance(result, Exception):
                     self.logger.warning(f"Download falhou para {album.medias[idx].file_name}, re-tentando individualmente.")
                     await self.download_media(album.medias[idx])
-        # Marca todas como baixadas
         for media in album.medias:
             media.downloaded = True
 
@@ -543,21 +541,20 @@ class TelegramAlbumTransfer:
             raise RuntimeError(f"Não foi possível baixar mídia {media.message_id} após muitas tentativas.")
         
     async def upload_album_with_retry(self, album: AlbumInfo):
-        async with self.upload_semaphore:
-            attempt = 0
-            while not album.uploaded:
-                try:
-                    await self.upload_album_corrected(album)
-                    album.uploaded = True
-                    await self.progress_tracker.save_album(album)
-                    await self.cleanup_album_files(album)
-                    break
-                except Exception as e:
-                    attempt += 1
-                    wait = min(300, 5 + attempt * 10)
-                    self.logger.error(f"Erro processando álbum/mídia {album.grouped_id}, tentativa {attempt}: {e}")
-                    self.logger.warning(f"RETRYING álbum/mídia {album.grouped_id} depois de {wait}s (não pode falhar!)")
-                    await asyncio.sleep(wait)
+        attempt = 0
+        while not album.uploaded:
+            try:
+                await self.upload_album_corrected(album)
+                album.uploaded = True
+                await self.progress_tracker.save_album(album)
+                await self.cleanup_album_files(album)
+                break
+            except Exception as e:
+                attempt += 1
+                wait = min(300, 5 + attempt * 10)
+                self.logger.error(f"Erro processando álbum/mídia {album.grouped_id}, tentativa {attempt}: {e}")
+                self.logger.warning(f"RETRYING álbum/mídia {album.grouped_id} depois de {wait}s (não pode falhar!)")
+                await asyncio.sleep(wait)
 
     async def upload_album_corrected(self, album: AlbumInfo):
         self.logger.info(f"Enviando álbum/mídia {album.grouped_id}")
@@ -575,7 +572,7 @@ class TelegramAlbumTransfer:
                     self.client.send_file,
                     self.target_chat_id,
                     files_to_send,
-                    caption=album.caption,
+                    caption=album.medias[0].caption if album.medias else album.caption,
                     force_document=False,
                     supports_streaming=True
                 )
