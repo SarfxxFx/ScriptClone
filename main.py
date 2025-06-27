@@ -10,6 +10,7 @@ Versão otimizada do script de transferência de álbuns do Telegram.
 - Mantém ordem cronológica.
 - Melhora para evitar rate limit: delay entre downloads, limitação de paralelismo, log detalhado.
 - Utiliza sempre download_file para todas as mídias.
+- **Upload paralelizado**: até 6 uploads em paralelo, mantendo ordem cronológica nas mensagens, e a mídia com legenda sempre em 1º.
 """
 
 import asyncio
@@ -169,6 +170,7 @@ class TelegramAlbumTransfer:
                  target_chat_id: int,
                  temp_dir: str = "./temp_media",
                  max_concurrent_downloads: int = 6,
+                 max_concurrent_uploads: int = 6,
                  progress_db: str = "./transfer_progress.db",
                  batch_size: int = 1000):
         self.client = TelegramClient(session_name, api_id, api_hash)
@@ -176,11 +178,13 @@ class TelegramAlbumTransfer:
         self.target_chat_id = target_chat_id
         self.temp_dir = Path(temp_dir)
         self.max_concurrent_downloads = max_concurrent_downloads
+        self.max_concurrent_uploads = max_concurrent_uploads
         self.batch_size = batch_size
         self.progress_tracker = ProgressTracker(progress_db)
         self.albums: Dict[int, AlbumInfo] = {}
         self.single_medias: List[MediaInfo] = []
         self.download_semaphore = asyncio.Semaphore(max_concurrent_downloads)
+        self.upload_semaphore = asyncio.Semaphore(max_concurrent_uploads)
         self.upload_delay = 7.0
         self.last_upload_time = 0
         self.request_delay = 3
@@ -334,8 +338,16 @@ class TelegramAlbumTransfer:
         batch_albums = []
         for grouped_id, medias in album_groups.items():
             if len(medias) >= 2:
+                # Ordena por data (garante ordem cronológica)
                 medias.sort(key=lambda x: x.date)
-                caption = next((m.caption for m in medias if m.caption), None)
+                # Reordena para mídia com legenda SEMPRE ser a primeira do álbum
+                medias_with_caption = [m for m in medias if m.caption]
+                medias_without_caption = [m for m in medias if not m.caption]
+                if medias_with_caption:
+                    # Mantém ordem cronológica entre os dois blocos
+                    medias = medias_with_caption + medias_without_caption
+                # Caption do álbum é a caption da primeira mídia com legenda
+                caption = medias_with_caption[0].caption if medias_with_caption else None
                 album = AlbumInfo(
                     grouped_id=grouped_id,
                     medias=medias,
@@ -461,36 +473,25 @@ class TelegramAlbumTransfer:
         if not pending_albums:
             self.logger.info("Todos os álbuns já foram enviados!")
             return
+
+        # --- DOWNLOAD EM SÉRIE, UPLOAD EM PARALELO (6) COM ORDEM ---
+        # Baixa todos os álbuns pendentes antes de subir, para garantir ordem!
         for i, album in enumerate(pending_albums):
-            if i % 10 == 0 or i == 0:
-                self.logger.info(f"Processando álbum {i+1}/{len(pending_albums)} "
-                               f"(Data: {album.date.strftime('%Y-%m-%d %H:%M:%S')}, "
-                               f"ID: {album.grouped_id})")
-            await self.download_and_upload_album_until_success(album)
+            if not album.downloaded:
+                self.logger.info(f"[Download] Preparando álbum {i+1}/{len(pending_albums)} "
+                                 f"(Data: {album.date.strftime('%Y-%m-%d %H:%M:%S')}, "
+                                 f"ID: {album.grouped_id})")
+                await self.download_and_flag_album(album)
+                await self.progress_tracker.save_album(album)
 
-    async def download_and_upload_album_until_success(self, album: AlbumInfo):
-        """Baixa e envia o álbum, com retentativas infinitas e backoff exponencial se necessário"""
-        attempt = 0
-        while True:
-            try:
-                if not album.downloaded:
-                    await self.download_album_safe(album)
-                    album.downloaded = True
-                    await self.progress_tracker.save_album(album)
-                if not album.uploaded:
-                    await self.upload_album_corrected(album)
-                    album.uploaded = True
-                    await self.progress_tracker.save_album(album)
-                await self.cleanup_album_files(album)
-                break
-            except Exception as e:
-                attempt += 1
-                wait = min(300, 5 + attempt * 10)
-                self.logger.error(f"Erro processando álbum {album.grouped_id}, tentativa {attempt}: {e}")
-                self.logger.warning(f"RETRYING álbum {album.grouped_id} depois de {wait}s (não pode falhar!)")
-                await asyncio.sleep(wait)
+        # Envia em paralelo de 6 em 6, mantendo ordem cronológica
+        self.logger.info(f"Iniciando upload paralelo de até {self.max_concurrent_uploads} álbuns em ordem cronológica...")
+        await self.parallel_upload_albums_in_order(pending_albums)
+        self.logger.info("Uploads concluídos com sucesso!")
 
-    async def download_album_safe(self, album: AlbumInfo):
+    async def download_and_flag_album(self, album: AlbumInfo):
+        if album.downloaded:
+            return
         try:
             await asyncio.wait_for(
                 self.download_album(album),
@@ -498,6 +499,7 @@ class TelegramAlbumTransfer:
             )
         except asyncio.TimeoutError:
             raise TimeoutError(f"Timeout baixando álbum {album.grouped_id}")
+        album.downloaded = True
 
     async def download_album(self, album: AlbumInfo):
         self.logger.info(f"Baixando álbum {album.grouped_id} "
@@ -516,6 +518,9 @@ class TelegramAlbumTransfer:
                 if isinstance(result, Exception):
                     self.logger.warning(f"Download falhou para {album.medias[idx].file_name}, re-tentando individualmente.")
                     await self.download_media(album.medias[idx])
+        # Marca todas como baixadas
+        for media in album.medias:
+            media.downloaded = True
 
     async def download_media(self, media: MediaInfo):
         async with self.download_semaphore:
@@ -559,6 +564,41 @@ class TelegramAlbumTransfer:
                 delay = min(delay * 2, 30)
             raise RuntimeError(f"Não foi possível baixar mídia {media.message_id} após muitas tentativas.")
         
+    async def parallel_upload_albums_in_order(self, albums: List[AlbumInfo]):
+        """Faz uploads paralelos de até N álbuns, mas mantém a ordem cronológica."""
+        pending = albums.copy()
+        idx = 0
+        total = len(pending)
+
+        while idx < total:
+            # Seleciona até N álbuns para upload em paralelo
+            batch = pending[idx:idx+self.max_concurrent_uploads]
+            self.logger.info(f"[Upload] Enviando álbuns {idx+1}~{idx+len(batch)} de {total} em paralelo...")
+            # Cada upload é um task, com semáforo
+            tasks = [
+                self.upload_album_with_retry(album)
+                for album in batch
+            ]
+            await asyncio.gather(*tasks)
+            idx += self.max_concurrent_uploads
+
+    async def upload_album_with_retry(self, album: AlbumInfo):
+        async with self.upload_semaphore:
+            attempt = 0
+            while not album.uploaded:
+                try:
+                    await self.upload_album_corrected(album)
+                    album.uploaded = True
+                    await self.progress_tracker.save_album(album)
+                    await self.cleanup_album_files(album)
+                    break
+                except Exception as e:
+                    attempt += 1
+                    wait = min(300, 5 + attempt * 10)
+                    self.logger.error(f"Erro processando álbum {album.grouped_id}, tentativa {attempt}: {e}")
+                    self.logger.warning(f"RETRYING álbum {album.grouped_id} depois de {wait}s (não pode falhar!)")
+                    await asyncio.sleep(wait)
+
     async def upload_album_corrected(self, album: AlbumInfo):
         self.logger.info(f"Enviando álbum {album.grouped_id}")
         time_since_last = time.time() - self.last_upload_time
@@ -618,6 +658,7 @@ async def main():
     TARGET_CHAT_ID = -1002608875175
     TEMP_DIR = "./temp_media"
     MAX_CONCURRENT_DOWNLOADS = 6
+    MAX_CONCURRENT_UPLOADS = 6
     PROGRESS_DB = "./transfer_progress.db"
     BATCH_SIZE = 200
     print("🚀 Script Otimizado - Transferência de Álbuns do Telegram")
@@ -625,6 +666,7 @@ async def main():
     print(f"📁 Origem: {SOURCE_CHAT_ID}")
     print(f"📁 Destino: {TARGET_CHAT_ID}")
     print(f"💾 Downloads paralelos: {MAX_CONCURRENT_DOWNLOADS}")
+    print(f"⬆️ Uploads paralelos: {MAX_CONCURRENT_UPLOADS}")
     print(f"📦 Tamanho do lote: {BATCH_SIZE}")
     print(f"🗄️ Diretório temporário: {TEMP_DIR}")
     print(f"📊 Banco de progresso: {PROGRESS_DB}")
@@ -636,6 +678,7 @@ async def main():
         target_chat_id=TARGET_CHAT_ID,
         temp_dir=TEMP_DIR,
         max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS,
+        max_concurrent_uploads=MAX_CONCURRENT_UPLOADS,
         progress_db=PROGRESS_DB,
         batch_size=BATCH_SIZE
     )
