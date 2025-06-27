@@ -203,6 +203,81 @@ class TelegramAlbumTransfer:
         self.logger = logging.getLogger(__name__)
         self.floodwait_log_count = 0
 
+    async def extract_media_info_safe(self, message: Message) -> Optional[MediaInfo]:
+        for attempt in range(self.max_retries):
+            try:
+                return await asyncio.wait_for(
+                    self.extract_media_info(message),
+                    timeout=self.timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning(f"Timeout extraindo mídia da mensagem {message.id}")
+                if attempt < self.max_retries - 1:
+                    await asyncio.sleep(1)
+                else:
+                    return None
+            except Exception as e:
+                self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
+                return None
+        return None
+
+    async def extract_media_info(self, message: Message) -> Optional[MediaInfo]:
+        if not hasattr(message, 'media') or not message.media:
+            return None
+        media_type = "unknown"
+        file_size = 0
+        file_name = f"media_{message.id}"
+        try:
+            if isinstance(message.media, MessageMediaPhoto):
+                media_type = "photo"
+                if hasattr(message.media.photo, 'sizes'):
+                    largest_size = max(message.media.photo.sizes, 
+                                     key=lambda x: getattr(x, 'size', 0) if hasattr(x, 'size') else 0)
+                    file_size = getattr(largest_size, 'size', 0) or 2000000
+                else:
+                    file_size = 2000000
+                file_name = f"photo_{message.id}.jpg"
+            elif isinstance(message.media, MessageMediaDocument):
+                doc = message.media.document
+                media_type = "document"
+                file_size = getattr(doc, 'size', 0)
+                mime_type = getattr(doc, 'mime_type', '')
+                if mime_type:
+                    if mime_type.startswith('video/'):
+                        media_type = "video"
+                    elif mime_type.startswith('image/'):
+                        media_type = "image"
+                    elif mime_type.startswith('audio/'):
+                        media_type = "audio"
+                if hasattr(doc, 'attributes'):
+                    for attr in doc.attributes:
+                        if hasattr(attr, 'file_name') and attr.file_name:
+                            file_name = attr.file_name
+                            break
+                    else:
+                        extension = "bin"
+                        if mime_type:
+                            extension = mime_type.split('/')[-1]
+                            if extension in ['jpeg', 'jpg']:
+                                extension = 'jpg'
+                            elif extension == 'mpeg':
+                                extension = 'mp4'
+                        file_name = f"{media_type}_{message.id}.{extension}"
+            if file_size == 0 and media_type == "unknown":
+                return None
+            return MediaInfo(
+                message_id=message.id,
+                grouped_id=getattr(message, 'grouped_id', None),
+                date=message.date,
+                media_type=media_type,
+                file_size=file_size,
+                file_name=file_name,
+                caption=getattr(message, 'text', None) or getattr(message, 'message', None)
+            )
+        except Exception as e:
+            self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
+            return None
+
     async def safe_telegram_call(self, func, *args, **kwargs):
         for attempt in range(10):
             try:
