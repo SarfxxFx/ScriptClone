@@ -1,0 +1,332 @@
+2025-06-26 18:43:18,386 - INFO - Connecting to 149.154.167.51:443/TcpFull...
+2025-06-26 18:43:21,287 - INFO - Connection to 149.154.167.51:443/TcpFull complete!
+2025-06-26 18:43:32,866 - INFO - Phone migrated to 1
+2025-06-26 18:43:33,062 - INFO - Reconnecting to new data center 1
+2025-06-26 18:43:33,424 - INFO - Disconnecting from 149.154.167.51:443/TcpFull...
+2025-06-26 18:43:33,424 - INFO - Disconnection from 149.154.167.51:443/TcpFull complete!
+2025-06-26 18:43:33,424 - INFO - Connecting to 149.154.175.59:443/TcpFull...
+2025-06-26 18:43:35,089 - INFO - Connection to 149.154.175.59:443/TcpFull complete!
+2025-06-26 18:44:04,654 - INFO - Cliente Telegram conectado
+2025-06-26 18:44:04,655 - INFO - Iniciando escaneamento completo e ordenado...
+2025-06-26 18:44:04,655 - INFO - Iniciando escaneamento cronológico completo...
+2025-06-26 18:44:04,955 - INFO - Coletando todas as mensagens com mídia...
+2025-06-26 18:45:07,245 - INFO - Coletadas 5000 mensagens...
+2025-06-26 18:46:11,226 - INFO - Coletadas 10000 mensagens...
+2025-06-26 18:47:14,891 - INFO - Coletadas 15000 mensagens...
+2025-06-26 18:48:18,962 - INFO - Coletadas 20000 mensagens...
+2025-06-26 18:49:22,571 - INFO - Coletadas 25000 mensagens...
+2025-06-26 18:50:26,573 - INFO - Coletadas 30000 mensagens...
+2025-06-26 18:51:30,546 - INFO - Coletadas 35000 mensagens...
+2025-06-26 18:52:34,465 - INFO - Coletadas 40000 mensagens...
+2025-06-26 18:53:38,104 - INFO - Coletadas 45000 mensagens...
+2025-06-26 18:54:41,651 - INFO - Coletadas 50000 mensagens...
+2025-06-26 18:55:44,922 - INFO - Coletadas 55000 mensagens...
+2025-06-26 18:56:48,550 - INFO - Coletadas 60000 mensagens...
+2025-06-26 18:57:52,045 - INFO - Coletadas 65000 mensagens...
+2025-06-26 18:58:55,678 - INFO - Coletadas 70000 mensagens...
+2025-06-26 18:59:05,493 - INFO - Got difference for channel 1263376056 updates
+2025-06-26 18:59:59,242 - INFO - Coletadas 75000 mensagens...
+2025-06-26 19:01:02,972 - INFO - Coletadas 80000 mensagens...
+2025-06-26 19:02:06,450 - INFO - Coletadas 85000 mensagens...
+2025-06-26 19:03:09,546 - INFO - Coletadas 90000 mensagens...
+2025-06-26 19:04:12,979 - INFO - Coletadas 95000 mensagens...
+2025-06-26 19:05:16,810 - INFO - Coletadas 100000 mensagens...
+2025-06-26 19:06:20,370 - INFO - Coletadas 105000 mensagens...
+2025-06-26 19:07:24,352 - INFO - Coletadas 110000 mensagens...
+2025-06-26 19:08:28,625 - INFO - Coletadas 115000 mensagens...
+2025-06-26 19:08:53,436 - INFO - Got difference for account updates
+2025-06-26 19:09:20,897 - INFO - Got difference for channel 2519203567 updates
+2025-06-26 19:09:32,448 - INFO - Coletadas 120000 mensagens...
+2025-06-26 19:10:36,150 - INFO - Coletadas 125000 mensagens...
+2025-06-26 19:11:40,279 - INFO - Coletadas 130000 mensagens...
+2025-06-26 19:12:44,324 - INFO - Coletadas 135000 mensagens...
+2025-06-26 19:13:47,966 - INFO - Coletadas 140000 mensagens...
+2025-06-26 19:14:51,709 - INFO - Coletadas 145000 mensagens...
+2025-06-26 19:15:55,929 - INFO - Coletadas 150000 mensagens...
+2025-06-26 19:16:59,269 - INFO - Coletadas 155000 mensagens...
+2025-06-26 19:18:02,514 - INFO - Coletadas 160000 mensagens...
+2025-06-26 19:19:06,558 - INFO - Coletadas 165000 mensagens...
+2025-06-26 19:20:10,440 - INFO - Coletadas 170000 mensagens...
+2025-06-26 19:21:14,698 - INFO - Coletadas 175000 mensagens...
+2025-06-26 19:21:42,234 - INFO - Coletadas 174166 mensagens com mídia de 177123 mensagens totais
+2025-06-26 19:21:42,234 - INFO - Primeira mensagem: ID=185127, Data=2023-12-06 01:53:53+00:00
+2025-06-26 19:21:42,234 - INFO - Última mensagem: ID=365120, Data=2025-06-25 04:51:06+00:00
+2025-06-26 19:21:42,235 - INFO - MsgID 185127 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185128 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185129 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185130 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185131 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185132 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185133 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185134 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185135 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100113
+2025-06-26 19:21:42,235 - INFO - MsgID 185136 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,235 - INFO - MsgID 185137 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,235 - INFO - MsgID 185138 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,236 - INFO - MsgID 185139 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,236 - INFO - MsgID 185140 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,236 - INFO - MsgID 185141 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,236 - INFO - MsgID 185142 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,236 - INFO - MsgID 185143 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100121
+2025-06-26 19:21:42,236 - INFO - MsgID 185144 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100129
+2025-06-26 19:21:42,236 - INFO - MsgID 185145 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100129
+2025-06-26 19:21:42,236 - INFO - MsgID 185146 - date=2023-12-06 01:53:53+00:00 grouped_id=13614621066100129
+2025-06-26 19:21:42,277 - INFO - Mensagens ordenadas cronologicamente
+2025-06-26 19:21:42,277 - INFO - Processando 174166 mensagens para identificar álbuns...
+2025-06-26 19:21:42,277 - INFO - Processando mensagem 1/174166
+2025-06-26 19:21:42,287 - INFO - Processando mensagem 1001/174166
+2025-06-26 19:21:42,297 - INFO - Processando mensagem 2001/174166
+2025-06-26 19:21:42,310 - INFO - Processando mensagem 3001/174166
+2025-06-26 19:21:42,319 - INFO - Processando mensagem 4001/174166
+2025-06-26 19:21:42,329 - INFO - Processando mensagem 5001/174166
+2025-06-26 19:21:42,339 - INFO - Processando mensagem 6001/174166
+2025-06-26 19:21:42,348 - INFO - Processando mensagem 7001/174166
+2025-06-26 19:21:42,358 - INFO - Processando mensagem 8001/174166
+2025-06-26 19:21:42,368 - INFO - Processando mensagem 9001/174166
+2025-06-26 19:21:42,381 - INFO - Processando mensagem 10001/174166
+2025-06-26 19:21:42,390 - INFO - Processando mensagem 11001/174166
+2025-06-26 19:21:42,399 - INFO - Processando mensagem 12001/174166
+2025-06-26 19:21:42,409 - INFO - Processando mensagem 13001/174166
+2025-06-26 19:21:42,419 - INFO - Processando mensagem 14001/174166
+2025-06-26 19:21:42,429 - INFO - Processando mensagem 15001/174166
+2025-06-26 19:21:42,438 - INFO - Processando mensagem 16001/174166
+2025-06-26 19:21:42,447 - INFO - Processando mensagem 17001/174166
+2025-06-26 19:21:42,460 - INFO - Processando mensagem 18001/174166
+2025-06-26 19:21:42,470 - INFO - Processando mensagem 19001/174166
+2025-06-26 19:21:42,480 - INFO - Processando mensagem 20001/174166
+2025-06-26 19:21:42,490 - INFO - Processando mensagem 21001/174166
+2025-06-26 19:21:42,500 - INFO - Processando mensagem 22001/174166
+2025-06-26 19:21:42,509 - INFO - Processando mensagem 23001/174166
+2025-06-26 19:21:42,519 - INFO - Processando mensagem 24001/174166
+2025-06-26 19:21:42,532 - INFO - Processando mensagem 25001/174166
+2025-06-26 19:21:42,541 - INFO - Processando mensagem 26001/174166
+2025-06-26 19:21:42,550 - INFO - Processando mensagem 27001/174166
+2025-06-26 19:21:42,560 - INFO - Processando mensagem 28001/174166
+2025-06-26 19:21:42,569 - INFO - Processando mensagem 29001/174166
+2025-06-26 19:21:42,579 - INFO - Processando mensagem 30001/174166
+2025-06-26 19:21:42,589 - INFO - Processando mensagem 31001/174166
+2025-06-26 19:21:42,598 - INFO - Processando mensagem 32001/174166
+2025-06-26 19:21:42,611 - INFO - Processando mensagem 33001/174166
+2025-06-26 19:21:42,620 - INFO - Processando mensagem 34001/174166
+2025-06-26 19:21:42,630 - INFO - Processando mensagem 35001/174166
+2025-06-26 19:21:42,639 - INFO - Processando mensagem 36001/174166
+2025-06-26 19:21:42,649 - INFO - Processando mensagem 37001/174166
+2025-06-26 19:21:42,658 - INFO - Processando mensagem 38001/174166
+2025-06-26 19:21:42,668 - INFO - Processando mensagem 39001/174166
+2025-06-26 19:21:42,681 - INFO - Processando mensagem 40001/174166
+2025-06-26 19:21:42,690 - INFO - Processando mensagem 41001/174166
+2025-06-26 19:21:42,700 - INFO - Processando mensagem 42001/174166
+2025-06-26 19:21:42,709 - INFO - Processando mensagem 43001/174166
+2025-06-26 19:21:42,718 - INFO - Processando mensagem 44001/174166
+2025-06-26 19:21:42,727 - INFO - Processando mensagem 45001/174166
+2025-06-26 19:21:42,735 - INFO - Processando mensagem 46001/174166
+2025-06-26 19:21:42,744 - INFO - Processando mensagem 47001/174166
+2025-06-26 19:21:42,756 - INFO - Processando mensagem 48001/174166
+2025-06-26 19:21:42,765 - INFO - Processando mensagem 49001/174166
+2025-06-26 19:21:42,774 - INFO - Processando mensagem 50001/174166
+2025-06-26 19:21:42,783 - INFO - Processando mensagem 51001/174166
+2025-06-26 19:21:42,792 - INFO - Processando mensagem 52001/174166
+2025-06-26 19:21:42,801 - INFO - Processando mensagem 53001/174166
+2025-06-26 19:21:42,810 - INFO - Processando mensagem 54001/174166
+2025-06-26 19:21:42,823 - INFO - Processando mensagem 55001/174166
+2025-06-26 19:21:42,832 - INFO - Processando mensagem 56001/174166
+2025-06-26 19:21:42,841 - INFO - Processando mensagem 57001/174166
+2025-06-26 19:21:42,853 - INFO - Processando mensagem 58001/174166
+2025-06-26 19:21:42,865 - INFO - Processando mensagem 59001/174166
+2025-06-26 19:21:42,876 - INFO - Processando mensagem 60001/174166
+2025-06-26 19:21:42,886 - INFO - Processando mensagem 61001/174166
+2025-06-26 19:21:42,895 - INFO - Processando mensagem 62001/174166
+2025-06-26 19:21:42,907 - INFO - Processando mensagem 63001/174166
+2025-06-26 19:21:42,916 - INFO - Processando mensagem 64001/174166
+2025-06-26 19:21:42,925 - INFO - Processando mensagem 65001/174166
+2025-06-26 19:21:42,934 - INFO - Processando mensagem 66001/174166
+2025-06-26 19:21:42,942 - INFO - Processando mensagem 67001/174166
+2025-06-26 19:21:42,951 - INFO - Processando mensagem 68001/174166
+2025-06-26 19:21:42,960 - INFO - Processando mensagem 69001/174166
+2025-06-26 19:21:42,971 - INFO - Processando mensagem 70001/174166
+2025-06-26 19:21:42,980 - INFO - Processando mensagem 71001/174166
+2025-06-26 19:21:42,989 - INFO - Processando mensagem 72001/174166
+2025-06-26 19:21:42,998 - INFO - Processando mensagem 73001/174166
+2025-06-26 19:21:43,007 - INFO - Processando mensagem 74001/174166
+2025-06-26 19:21:43,016 - INFO - Processando mensagem 75001/174166
+2025-06-26 19:21:43,024 - INFO - Processando mensagem 76001/174166
+2025-06-26 19:21:43,033 - INFO - Processando mensagem 77001/174166
+2025-06-26 19:21:43,044 - INFO - Processando mensagem 78001/174166
+2025-06-26 19:21:43,053 - INFO - Processando mensagem 79001/174166
+2025-06-26 19:21:43,061 - INFO - Processando mensagem 80001/174166
+2025-06-26 19:21:43,070 - INFO - Processando mensagem 81001/174166
+2025-06-26 19:21:43,078 - INFO - Processando mensagem 82001/174166
+2025-06-26 19:21:43,086 - INFO - Processando mensagem 83001/174166
+2025-06-26 19:21:43,095 - INFO - Processando mensagem 84001/174166
+2025-06-26 19:21:43,104 - INFO - Processando mensagem 85001/174166
+2025-06-26 19:21:43,116 - INFO - Processando mensagem 86001/174166
+2025-06-26 19:21:43,125 - INFO - Processando mensagem 87001/174166
+2025-06-26 19:21:43,133 - INFO - Processando mensagem 88001/174166
+2025-06-26 19:21:43,142 - INFO - Processando mensagem 89001/174166
+2025-06-26 19:21:43,150 - INFO - Processando mensagem 90001/174166
+2025-06-26 19:21:43,159 - INFO - Processando mensagem 91001/174166
+2025-06-26 19:21:43,168 - INFO - Processando mensagem 92001/174166
+2025-06-26 19:21:43,180 - INFO - Processando mensagem 93001/174166
+2025-06-26 19:21:43,188 - INFO - Processando mensagem 94001/174166
+2025-06-26 19:21:43,197 - INFO - Processando mensagem 95001/174166
+2025-06-26 19:21:43,205 - INFO - Processando mensagem 96001/174166
+2025-06-26 19:21:43,214 - INFO - Processando mensagem 97001/174166
+2025-06-26 19:21:43,223 - INFO - Processando mensagem 98001/174166
+2025-06-26 19:21:43,231 - INFO - Processando mensagem 99001/174166
+2025-06-26 19:21:43,240 - INFO - Processando mensagem 100001/174166
+2025-06-26 19:21:43,704 - INFO - Processando mensagem 101001/174166
+2025-06-26 19:21:43,713 - INFO - Processando mensagem 102001/174166
+2025-06-26 19:21:43,722 - INFO - Processando mensagem 103001/174166
+2025-06-26 19:21:43,731 - INFO - Processando mensagem 104001/174166
+2025-06-26 19:21:43,739 - INFO - Processando mensagem 105001/174166
+2025-06-26 19:21:43,748 - INFO - Processando mensagem 106001/174166
+2025-06-26 19:21:43,756 - INFO - Processando mensagem 107001/174166
+2025-06-26 19:21:43,765 - INFO - Processando mensagem 108001/174166
+2025-06-26 19:21:43,776 - INFO - Processando mensagem 109001/174166
+2025-06-26 19:21:43,785 - INFO - Processando mensagem 110001/174166
+2025-06-26 19:21:43,794 - INFO - Processando mensagem 111001/174166
+2025-06-26 19:21:43,803 - INFO - Processando mensagem 112001/174166
+2025-06-26 19:21:43,812 - INFO - Processando mensagem 113001/174166
+2025-06-26 19:21:43,821 - INFO - Processando mensagem 114001/174166
+2025-06-26 19:21:43,830 - INFO - Processando mensagem 115001/174166
+2025-06-26 19:21:43,841 - INFO - Processando mensagem 116001/174166
+2025-06-26 19:21:43,850 - INFO - Processando mensagem 117001/174166
+2025-06-26 19:21:43,859 - INFO - Processando mensagem 118001/174166
+2025-06-26 19:21:43,868 - INFO - Processando mensagem 119001/174166
+2025-06-26 19:21:43,877 - INFO - Processando mensagem 120001/174166
+2025-06-26 19:21:43,886 - INFO - Processando mensagem 121001/174166
+2025-06-26 19:21:43,894 - INFO - Processando mensagem 122001/174166
+2025-06-26 19:21:43,903 - INFO - Processando mensagem 123001/174166
+2025-06-26 19:21:43,915 - INFO - Processando mensagem 124001/174166
+2025-06-26 19:21:43,924 - INFO - Processando mensagem 125001/174166
+2025-06-26 19:21:43,933 - INFO - Processando mensagem 126001/174166
+2025-06-26 19:21:43,942 - INFO - Processando mensagem 127001/174166
+2025-06-26 19:21:43,951 - INFO - Processando mensagem 128001/174166
+2025-06-26 19:21:43,960 - INFO - Processando mensagem 129001/174166
+2025-06-26 19:21:43,969 - INFO - Processando mensagem 130001/174166
+2025-06-26 19:21:43,978 - INFO - Processando mensagem 131001/174166
+2025-06-26 19:21:43,989 - INFO - Processando mensagem 132001/174166
+2025-06-26 19:21:43,998 - INFO - Processando mensagem 133001/174166
+2025-06-26 19:21:44,007 - INFO - Processando mensagem 134001/174166
+2025-06-26 19:21:44,015 - INFO - Processando mensagem 135001/174166
+2025-06-26 19:21:44,024 - INFO - Processando mensagem 136001/174166
+2025-06-26 19:21:44,033 - INFO - Processando mensagem 137001/174166
+2025-06-26 19:21:44,042 - INFO - Processando mensagem 138001/174166
+2025-06-26 19:21:44,054 - INFO - Processando mensagem 139001/174166
+2025-06-26 19:21:44,063 - INFO - Processando mensagem 140001/174166
+2025-06-26 19:21:44,072 - INFO - Processando mensagem 141001/174166
+2025-06-26 19:21:44,080 - INFO - Processando mensagem 142001/174166
+2025-06-26 19:21:44,089 - INFO - Processando mensagem 143001/174166
+2025-06-26 19:21:44,098 - INFO - Processando mensagem 144001/174166
+2025-06-26 19:21:44,107 - INFO - Processando mensagem 145001/174166
+2025-06-26 19:21:44,116 - INFO - Processando mensagem 146001/174166
+2025-06-26 19:21:44,127 - INFO - Processando mensagem 147001/174166
+2025-06-26 19:21:44,136 - INFO - Processando mensagem 148001/174166
+2025-06-26 19:21:44,144 - INFO - Processando mensagem 149001/174166
+2025-06-26 19:21:44,153 - INFO - Processando mensagem 150001/174166
+2025-06-26 19:21:44,162 - INFO - Processando mensagem 151001/174166
+2025-06-26 19:21:44,171 - INFO - Processando mensagem 152001/174166
+2025-06-26 19:21:44,179 - INFO - Processando mensagem 153001/174166
+2025-06-26 19:21:44,191 - INFO - Processando mensagem 154001/174166
+2025-06-26 19:21:44,200 - INFO - Processando mensagem 155001/174166
+2025-06-26 19:21:44,208 - INFO - Processando mensagem 156001/174166
+2025-06-26 19:21:44,217 - INFO - Processando mensagem 157001/174166
+2025-06-26 19:21:44,226 - INFO - Processando mensagem 158001/174166
+2025-06-26 19:21:44,234 - INFO - Processando mensagem 159001/174166
+2025-06-26 19:21:44,243 - INFO - Processando mensagem 160001/174166
+2025-06-26 19:21:44,252 - INFO - Processando mensagem 161001/174166
+2025-06-26 19:21:44,264 - INFO - Processando mensagem 162001/174166
+2025-06-26 19:21:44,272 - INFO - Processando mensagem 163001/174166
+2025-06-26 19:21:44,282 - INFO - Processando mensagem 164001/174166
+2025-06-26 19:21:44,291 - INFO - Processando mensagem 165001/174166
+2025-06-26 19:21:44,299 - INFO - Processando mensagem 166001/174166
+2025-06-26 19:21:44,308 - INFO - Processando mensagem 167001/174166
+2025-06-26 19:21:44,317 - INFO - Processando mensagem 168001/174166
+2025-06-26 19:21:44,325 - INFO - Processando mensagem 169001/174166
+2025-06-26 19:21:44,337 - INFO - Processando mensagem 170001/174166
+2025-06-26 19:21:44,346 - INFO - Processando mensagem 171001/174166
+2025-06-26 19:21:44,355 - INFO - Processando mensagem 172001/174166
+2025-06-26 19:21:44,364 - INFO - Processando mensagem 173001/174166
+2025-06-26 19:21:44,372 - INFO - Processando mensagem 174001/174166
+2025-06-26 19:21:44,374 - INFO - Encontradas 174165 mídias, 30294 grupos potenciais
+2025-06-26 19:21:44,374 - INFO - Álbum 1: ID=13614621066100113, Data=2023-12-06 01:53:53, Mídias=9, Tipos=['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:21:44,374 - INFO - Álbum 2: ID=13614621066100121, Data=2023-12-06 01:53:53, Mídias=8, Tipos=['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:21:44,374 - INFO - Álbum 3: ID=13614621066100129, Data=2023-12-06 01:53:53, Mídias=8, Tipos=['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:21:44,374 - INFO - Álbum 4: ID=13614621066100137, Data=2023-12-06 01:53:54, Mídias=8, Tipos=['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:21:44,375 - INFO - Álbum 5: ID=13614621066100145, Data=2023-12-06 01:53:54, Mídias=8, Tipos=['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:23:35,310 - INFO - Álbuns válidos criados: 30290
+2025-06-26 19:23:35,311 - INFO - Mídias individuais: 0
+2025-06-26 19:23:35,315 - INFO - Encontrados 6754 álbuns de dezembro de 2023:
+2025-06-26 19:23:35,315 - INFO -   - Álbum 13614621066100113: 2023-12-06 01:53:53, 9 mídias, tipos: ['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:23:35,315 - INFO -   - Álbum 13614621066100121: 2023-12-06 01:53:53, 8 mídias, tipos: ['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:23:35,315 - INFO -   - Álbum 13614621066100129: 2023-12-06 01:53:53, 8 mídias, tipos: ['video', 'video', 'video', 'video', 'video', 'video', 'video', 'video']
+2025-06-26 19:23:35,535 - INFO - Escaneamento concluído: 30290 álbuns encontrados
+2025-06-26 19:23:35,698 - INFO - Processando 30290 álbuns em ordem cronológica
+2025-06-26 19:23:35,699 - INFO - Primeiro álbum: 2023-12-06 01:53:53 (ID: 13614621066100113)
+2025-06-26 19:23:35,699 - INFO - Último álbum: 2025-06-25 04:51:06 (ID: 14006616480131473)
+2025-06-26 19:23:35,701 - INFO - Álbuns pendentes de upload: 30290
+2025-06-26 19:23:35,701 - INFO - Processando álbum 1/30290 (Data: 2023-12-06 01:53:53, ID: 13614621066100113)
+2025-06-26 19:23:35,701 - INFO - Baixando álbum 13614621066100113 (9 mídias, 38.4 MB)
+2025-06-26 19:24:16,666 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:24:17,410 - INFO - Got difference for channel 1495276024 updates
+2025-06-26 19:24:18,102 - INFO - Got difference for channel 2259314026 updates
+2025-06-26 19:24:26,593 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:24:46,440 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:25:06,067 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:25:27,406 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:25:49,207 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:26:05,346 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:26:33,045 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:26:57,634 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:27:14,157 - INFO - Enviando álbum 13614621066100113
+2025-06-26 19:27:14,304 - INFO - Uploading file of 2212581 bytes in 17 chunks of 131072
+2025-06-26 19:27:23,527 - INFO - Uploading file of 4400351 bytes in 34 chunks of 131072
+2025-06-26 19:27:41,516 - INFO - Uploading file of 4456796 bytes in 35 chunks of 131072
+2025-06-26 19:27:59,736 - INFO - Uploading file of 4875558 bytes in 38 chunks of 131072
+2025-06-26 19:28:19,497 - INFO - Uploading file of 4912879 bytes in 38 chunks of 131072
+2025-06-26 19:28:39,764 - INFO - Uploading file of 3696262 bytes in 29 chunks of 131072
+2025-06-26 19:28:55,194 - INFO - Uploading file of 6296875 bytes in 49 chunks of 131072
+2025-06-26 19:29:21,157 - INFO - Uploading file of 5616030 bytes in 43 chunks of 131072
+2025-06-26 19:29:43,692 - INFO - Uploading file of 3749577 bytes in 29 chunks of 131072
+2025-06-26 19:30:00,107 - INFO - Álbum 13614621066100113 enviado com sucesso (9 mídias)
+2025-06-26 19:30:00,620 - INFO - Baixando álbum 13614621066100121 (8 mídias, 412.1 MB)
+2025-06-26 19:30:00,780 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:33:24,110 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:36:07,719 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:36:21,701 - INFO - Starting direct file download in chunks of 262144 at 0, stride 262144
+2025-06-26 19:38:01,096 - ERROR - Erro processando álbum 13614621066100121, tentativa 1: Timeout while fetching data (caused by str)
+2025-06-26 19:38:06,108 - INFO - Baixando álbum 13614621066100121 (8 mídias, 412.1 MB)
+2025-06-26 19:38:06,303 - INFO - Starting direct file download in chunks of 262144 at 0, stride 262144
+2025-06-26 19:46:06,118 - ERROR - Erro processando álbum 13614621066100121, tentativa 2: Timeout while fetching data (caused by str)
+2025-06-26 19:46:11,122 - INFO - Baixando álbum 13614621066100121 (8 mídias, 412.1 MB)
+2025-06-26 19:46:11,308 - INFO - Starting direct file download in chunks of 262144 at 0, stride 262144
+2025-06-26 19:46:43,436 - INFO - Got difference for channel 2259314026 updates
+2025-06-26 19:54:11,296 - ERROR - Erro processando álbum 13614621066100121, tentativa 3: Timeout while fetching data (caused by str)
+2025-06-26 19:54:11,296 - ERROR - Falha definitiva no álbum 13614621066100121
+2025-06-26 19:54:11,296 - INFO - Baixando álbum 13614621066100129 (8 mídias, 21.9 MB)
+2025-06-26 19:54:12,302 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:54:16,788 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:54:34,026 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:54:46,678 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:54:59,701 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:55:14,783 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:55:36,633 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:55:49,679 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:55:54,047 - INFO - Enviando álbum 13614621066100129
+2025-06-26 19:55:54,048 - INFO - Uploading file of 996545 bytes in 8 chunks of 131072
+2025-06-26 19:55:58,452 - INFO - Uploading file of 3915737 bytes in 30 chunks of 131072
+2025-06-26 19:56:14,631 - INFO - Uploading file of 2835059 bytes in 22 chunks of 131072
+2025-06-26 19:56:26,324 - INFO - Uploading file of 2931481 bytes in 23 chunks of 131072
+2025-06-26 19:56:38,625 - INFO - Uploading file of 3457916 bytes in 27 chunks of 131072
+2025-06-26 19:56:52,437 - INFO - Uploading file of 4932807 bytes in 38 chunks of 131072
+2025-06-26 19:57:12,727 - INFO - Uploading file of 2968831 bytes in 23 chunks of 131072
+2025-06-26 19:57:25,156 - INFO - Uploading file of 932110 bytes in 8 chunks of 131072
+2025-06-26 19:57:29,847 - INFO - Álbum 13614621066100129 enviado com sucesso (8 mídias)
+2025-06-26 19:57:30,089 - INFO - Baixando álbum 13614621066100137 (8 mídias, 24.1 MB)
+2025-06-26 19:57:30,249 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:57:47,717 - INFO - Got difference for channel 1495276024 updates
+2025-06-26 19:57:50,982 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:58:07,736 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:58:20,818 - INFO - Starting direct file download in chunks of 131072 at 0, stride 131072
+2025-06-26 19:58:29,399 - INFO - Disconnecting from 149.154.175.59:443/TcpFull...
+2025-06-26 19:58:29,399 - INFO - Disconnection from 149.154.175.59:443/TcpFull complete!
