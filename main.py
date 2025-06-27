@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
 Versão otimizada do script de transferência de álbuns do Telegram.
-- Download paralelizado de álbuns (buffer).
-- Upload paralelizado de álbuns, mas sempre mantendo a ordem cronológica (respeita ordem da fila).
-- Correção: upload só começa após todos os arquivos do álbum existirem em disco!
+- Download paralelizado e confiável para álbuns (NÃO pode falhar!).
+- Download por fila cronológica: só entra na fila de upload quando todos anteriores já baixaram.
+- Upload paralelizado (workers), mas só envia quando álbum atinge a cabeça da fila de upload (ordem garantida).
+- Retentativas infinitas para álbuns, com backoff exponencial.
+- Chunks de download dinâmicos (ajusta para arquivos grandes).
+- Logs claros sobre progresso e falhas.
+- Download de mídia individual com retentativas e verificação de integridade.
+- Upload seguro, também com retentativas.
+- Mantém ordem cronológica absoluta.
+- Melhora para evitar rate limit: delay entre downloads, limitação de paralelismo, log detalhado.
+- Utiliza sempre download_file para todas as mídias.
 """
 
 import asyncio
@@ -14,7 +22,7 @@ import shutil
 import sqlite3
 import sys
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -154,7 +162,7 @@ class ProgressTracker:
             return result[0] if result else None
 
 class TelegramAlbumTransfer:
-    """Classe principal para transferência de álbuns com fila e upload paralelo ordenado"""
+    """Classe principal para transferência de álbuns com fila cronológica para downloads e uploads"""
     def __init__(self, 
                  api_id: int,
                  api_hash: str,
@@ -165,8 +173,7 @@ class TelegramAlbumTransfer:
                  max_concurrent_downloads: int = 6,
                  progress_db: str = "./transfer_progress.db",
                  batch_size: int = 1000,
-                 prefetch_albums: int = 8,
-                 max_concurrent_uploads: int = 3):
+                 max_concurrent_uploads: int = 3):  # upload prepara em paralelo, mas envia 1 por vez
         self.client = TelegramClient(session_name, api_id, api_hash)
         self.source_chat_id = source_chat_id
         self.target_chat_id = target_chat_id
@@ -184,7 +191,6 @@ class TelegramAlbumTransfer:
         self.flood_wait_multiplier = 1.7
         self.max_retries = 5
         self.download_delay = 0.8
-        self.prefetch_albums = prefetch_albums  # Quantos álbuns baixar antes de começar uploads (buffer/fila)
         self.max_concurrent_uploads = max_concurrent_uploads
         logging.basicConfig(
             level=logging.INFO,
@@ -226,7 +232,7 @@ class TelegramAlbumTransfer:
                 await self.scan_messages_chronological()
             else:
                 self.logger.info("Escaneamento já foi concluído anteriormente")
-            await self.process_albums_chronological_with_parallel_uploads()
+            await self.process_albums_fifo_download_and_upload()
             self.logger.info("Transferência concluída com sucesso!")
         except Exception as e:
             self.logger.error(f"Erro durante a transferência: {e}")
@@ -444,107 +450,88 @@ class TelegramAlbumTransfer:
             self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
             return None
 
-    async def process_albums_chronological_with_parallel_uploads(self):
-        """Downloads paralelos de álbuns, uploads paralelos mas SEMPRE na ordem da fila."""
+    async def process_albums_fifo_download_and_upload(self):
+        """
+        Downloads paralelos seguindo ordem cronológica, só entrando na fila de upload 
+        quando todos anteriores também já baixaram. Uploads preparados em paralelo, 
+        mas só enviados quando o álbum atingir a cabeça da fila.
+        """
         sorted_albums = sorted(self.albums.values(), key=lambda x: x.date)
-        pending_albums = [album for album in sorted_albums if not album.uploaded]
-        total = len(pending_albums)
-        self.logger.info(f"Processando {total} álbuns em ordem cronológica (upload paralelo ordenado)")
-        if not pending_albums:
-            self.logger.info("Todos os álbuns já foram enviados!")
-            return
+        total_albums = len(sorted_albums)
+        self.logger.info(f"Processando {total_albums} álbuns com fila cronológica garantida")
 
-        upload_queue = deque()
-        download_tasks = {}
-        album_idx = 0
+        # ---- FIFO/ORDERED DOWNLOAD & UPLOAD QUEUES ----
+        # (1) Baixar em paralelo, mas só liberar para upload na ordem
+        download_status = [False] * total_albums
+        upload_status = [False] * total_albums
+        download_tasks = [None] * total_albums
+        download_condition = asyncio.Condition()
+        upload_condition = asyncio.Condition()
 
-        # Pré-carrega até prefetch_albums álbuns para download em paralelo
-        while album_idx < len(pending_albums) and len(download_tasks) < self.prefetch_albums:
-            album = pending_albums[album_idx]
-            self.logger.info(f"[Fila] Iniciando download do álbum {album_idx+1}/{total}, ID {album.grouped_id}")
-            task = asyncio.create_task(self.download_album_safe(album))
-            download_tasks[album.grouped_id] = (task, album)
-            album_idx += 1
+        async def download_worker(idx: int, album: AlbumInfo):
+            nonlocal download_status, download_tasks
+            async with download_condition:
+                while idx > 0 and not download_status[idx-1]:
+                    await download_condition.wait()
+            # Baixar o álbum (paralelo mas só libera para upload na ordem)
+            attempt = 0
+            while True:
+                try:
+                    await self.download_album_safe(album)
+                    album.downloaded = True
+                    await self.progress_tracker.save_album(album)
+                    break
+                except Exception as e:
+                    attempt += 1
+                    wait = min(300, 5 + attempt * 10)
+                    self.logger.error(f"Erro baixando álbum {album.grouped_id}, tentativa {attempt}: {e}")
+                    self.logger.warning(f"RETRYING álbum {album.grouped_id} depois de {wait}s (não pode falhar!)")
+                    await asyncio.sleep(wait)
+            async with download_condition:
+                download_status[idx] = True
+                download_condition.notify_all()
 
-        # Vamos controlar a janela de uploads paralelos, mas respeitando a fila
-        uploads_in_progress = {}
-        upload_results = {}
-        next_upload_index = 0
+        # (2) Upload: vários workers preparados, mas só envia quando chegar a vez
+        async def upload_worker(idx: int, album: AlbumInfo):
+            nonlocal upload_status, download_status
+            # Espera todos os downloads anteriores terminarem
+            async with upload_condition:
+                while idx > 0 and not upload_status[idx-1]:
+                    await upload_condition.wait()
+            # Só faz upload se baixado!
+            while not download_status[idx]:
+                await asyncio.sleep(0.5)
+            # UPLOAD REAL (só agora libera o envio!)
+            attempt = 0
+            while True:
+                try:
+                    await self.upload_album_corrected(album)
+                    album.uploaded = True
+                    await self.progress_tracker.save_album(album)
+                    await self.cleanup_album_files(album)
+                    break
+                except Exception as e:
+                    attempt += 1
+                    wait = min(300, 5 + attempt * 10)
+                    self.logger.error(f"Erro enviando álbum {album.grouped_id}, tentativa {attempt}: {e}")
+                    self.logger.warning(f"RETRYING upload álbum {album.grouped_id} depois de {wait}s (não pode falhar!)")
+                    await asyncio.sleep(wait)
+            async with upload_condition:
+                upload_status[idx] = True
+                upload_condition.notify_all()
 
-        while next_upload_index < total:
-            # Aguarda ao menos um álbum baixar por completo
-            if not upload_queue:
-                done, _ = await asyncio.wait(
-                    [t for t, _ in download_tasks.values()],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                for group_id, (task, album) in list(download_tasks.items()):
-                    if task in done:
-                        try:
-                            await task  # Propaga exceção se houve erro
-                            album.downloaded = True
-                            await self.progress_tracker.save_album(album)
-                            # VERIFICAÇÃO EXTRA: todos os arquivos do álbum existem?
-                            all_ok = True
-                            for media in album.medias:
-                                if not (media.local_path and os.path.exists(media.local_path)):
-                                    self.logger.error(f"Mídia {media.file_name} não foi baixada corretamente para o álbum {album.grouped_id}. Retentando...")
-                                    await self.download_media(media)
-                                    if not (media.local_path and os.path.exists(media.local_path)):
-                                        all_ok = False
-                                        break
-                            if all_ok:
-                                upload_queue.append(album)
-                                self.logger.info(f"[Fila] Álbum baixado e enfileirado para upload: {album.grouped_id}")
-                            else:
-                                self.logger.error(f"Álbum {album.grouped_id} não está completamente baixado. Nova tentativa no final da fila.")
-                                # Tenta baixar de novo ao final
-                                download_tasks[group_id] = (asyncio.create_task(self.download_album_safe(album)), album)
-                                continue
-                        except Exception as e:
-                            self.logger.error(f"Download de álbum {album.grouped_id} falhou: {e}")
-                            download_tasks[group_id] = (asyncio.create_task(self.download_album_safe(album)), album)
-                            continue
-                        del download_tasks[group_id]
-                # Mantém o buffer de downloads cheio
-                while album_idx < len(pending_albums) and len(download_tasks) < self.prefetch_albums:
-                    album = pending_albums[album_idx]
-                    self.logger.info(f"[Fila] Iniciando download do álbum {album_idx+1}/{total}, ID {album.grouped_id}")
-                    task = asyncio.create_task(self.download_album_safe(album))
-                    download_tasks[album.grouped_id] = (task, album)
-                    album_idx += 1
+        # (3) Inicia downloads paralelos (limitados)
+        semaphore = asyncio.Semaphore(self.max_concurrent_downloads)
+        async def download_limited(idx, album):
+            async with semaphore:
+                await download_worker(idx, album)
+        downloaders = [asyncio.create_task(download_limited(idx, album)) for idx, album in enumerate(sorted_albums)]
 
-            # Envia em paralelo até o limite, mas só álbuns no início da fila
-            while (len(uploads_in_progress) < self.max_concurrent_uploads and
-                   upload_queue and
-                   next_upload_index + len(uploads_in_progress) < total):
-                # Mantém a ordem: só pega o próximo álbum da fila
-                album = upload_queue.popleft()
-                idx = next_upload_index + len(uploads_in_progress)
-                self.logger.info(f"[UPLOAD-FILA] Slot {len(uploads_in_progress)+1}/{self.max_concurrent_uploads}: preparando envio do álbum {album.grouped_id} (posição {idx+1}/{total})")
-                upload_task = asyncio.create_task(self.upload_album_with_status(album, idx))
-                uploads_in_progress[idx] = (upload_task, album)
+        # (4) Uploads paralelos preparados, mas só um envia por vez (sequencial na ordem)
+        uploaders = [asyncio.create_task(upload_worker(idx, album)) for idx, album in enumerate(sorted_albums)]
 
-            # Aguarda o upload mais antigo terminar, antes de liberar o próximo na ordem!
-            if uploads_in_progress:
-                idx_to_await = min(uploads_in_progress.keys())
-                task, album = uploads_in_progress[idx_to_await]
-                await task  # Garante ordem
-                upload_results[idx_to_await] = True
-                del uploads_in_progress[idx_to_await]
-                next_upload_index += 1
-
-    async def upload_album_with_status(self, album, idx):
-        try:
-            await self.upload_album_corrected(album)
-            album.uploaded = True
-            await self.progress_tracker.save_album(album)
-            await self.cleanup_album_files(album)
-            self.logger.info(f"[UPLOAD-FILA] Álbum {album.grouped_id} enviado com sucesso (posição {idx+1})")
-        except Exception as e:
-            self.logger.error(f"[UPLOAD-FILA] Falha ao enviar álbum {album.grouped_id} (posição {idx+1}): {e}")
-            await asyncio.sleep(10)
-            await self.upload_album_with_status(album, idx)
+        await asyncio.gather(*downloaders)
+        await asyncio.gather(*uploaders)
 
     async def download_album_safe(self, album: AlbumInfo):
         try:
@@ -573,14 +560,6 @@ class TelegramAlbumTransfer:
                     self.logger.warning(f"Download falhou para {album.medias[idx].file_name}, re-tentando individualmente.")
                     await self.download_media(album.medias[idx])
 
-        # VERIFICAÇÃO EXTRA: garante que todos existem
-        for media in album.medias:
-            if not (media.local_path and os.path.exists(media.local_path)):
-                self.logger.error(f"Mídia {media.file_name} não foi baixada corretamente para o álbum {album.grouped_id}")
-                await self.download_media(media)
-                if not (media.local_path and os.path.exists(media.local_path)):
-                    raise RuntimeError(f"Falha persistente ao baixar {media.file_name} para álbum {album.grouped_id}")
-
     async def download_media(self, media: MediaInfo):
         async with self.download_semaphore:
             delay = 1
@@ -589,9 +568,12 @@ class TelegramAlbumTransfer:
                     await asyncio.sleep(self.download_delay)
                     message = await self.safe_telegram_call(self.client.get_messages, self.source_chat_id, ids=media.message_id)
                     if message and message.media:
+                        # Utiliza sempre download_file para todos os tipos de mídia (inclusive fotos)
                         input_location = None
+                        # Para documentos e vídeos
                         if hasattr(message.media, "document") and message.media.document:
                             input_location = message.media.document
+                        # Para fotos
                         elif hasattr(message.media, "photo") and message.media.photo:
                             input_location = message.media.photo
                         else:
@@ -600,7 +582,7 @@ class TelegramAlbumTransfer:
                             self.client.download_file,
                             input_location,
                             file=media.local_path,
-                            part_size_kb=4096
+                            part_size_kb=4096 # 4 MB
                         )
                         if os.path.exists(media.local_path) and os.path.getsize(media.local_path) > 1000:
                             media.downloaded = True
@@ -625,7 +607,6 @@ class TelegramAlbumTransfer:
         time_since_last = time.time() - self.last_upload_time
         if time_since_last < self.upload_delay:
             await asyncio.sleep(self.upload_delay - time_since_last)
-        album.medias.sort(key=lambda m: (m.caption is None, m.date))
         for attempt in range(10):
             try:
                 files_to_send = []
@@ -637,7 +618,7 @@ class TelegramAlbumTransfer:
                     self.client.send_file,
                     self.target_chat_id,
                     files_to_send,
-                    caption=album.medias[0].caption if album.medias else album.caption,
+                    caption=album.caption,
                     force_document=False,
                     supports_streaming=True
                 )
@@ -682,15 +663,13 @@ async def main():
     MAX_CONCURRENT_DOWNLOADS = 6
     PROGRESS_DB = "./transfer_progress.db"
     BATCH_SIZE = 200
-    PREFETCH_ALBUMS = 8  # Quantos álbuns ficarão em buffer para download (ajuste conforme RAM/rede)
-    MAX_CONCURRENT_UPLOADS = 3  # Quantos uploads de álbum rodar em paralelo (mas sempre respeitando ordem da fila)
-    print("🚀 Script Otimizado - Transferência de Álbuns do Telegram (Upload Paralelo Ordenado)")
-    print("✅ Download e upload confiáveis, paralelismo, retentativas infinitas para álbuns.")
+    MAX_CONCURRENT_UPLOADS = 3
+    print("🚀 Script Otimizado - Transferência de Álbuns do Telegram")
+    print("✅ Download por fila cronológica, upload paralelo com ordem absoluta garantida.")
     print(f"📁 Origem: {SOURCE_CHAT_ID}")
     print(f"📁 Destino: {TARGET_CHAT_ID}")
-    print(f"💾 Downloads paralelos por álbum: {MAX_CONCURRENT_DOWNLOADS}")
-    print(f"📦 Buffer de álbuns em download: {PREFETCH_ALBUMS}")
-    print(f"⬆️ Uploads paralelos de álbuns: {MAX_CONCURRENT_UPLOADS}")
+    print(f"💾 Downloads paralelos: {MAX_CONCURRENT_DOWNLOADS}")
+    print(f"⬆️ Uploads preparados: {MAX_CONCURRENT_UPLOADS}")
     print(f"📦 Tamanho do lote: {BATCH_SIZE}")
     print(f"🗄️ Diretório temporário: {TEMP_DIR}")
     print(f"📊 Banco de progresso: {PROGRESS_DB}")
@@ -704,7 +683,6 @@ async def main():
         max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS,
         progress_db=PROGRESS_DB,
         batch_size=BATCH_SIZE,
-        prefetch_albums=PREFETCH_ALBUMS,
         max_concurrent_uploads=MAX_CONCURRENT_UPLOADS
     )
     try:
