@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-Script otimizado para transferência de álbuns do Telegram.
-- Download paralelizado por ÁLBUM (limite configurável, ex: 8).
-- Upload: prepara até 3 álbuns em paralelo, mas só envia 1 por vez (ordem garantida).
-- Download de mídia individual limitado por álbum, com retentativas.
-- Ordem cronológica absoluta.
-- Logs detalhados.
+Versão otimizada do script de transferência de álbuns do Telegram.
+Sistema de 3 filas: Download (8), Upload (3), Envio (1), com ordem absoluta e sem ultrapassagem.
 """
 
 import asyncio
@@ -27,7 +23,6 @@ print("Telethon version:", telethon.__version__)
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, Message
 from telethon.errors import FloodWaitError, SlowModeWaitError, TimeoutError, RPCError
-from tqdm import tqdm
 
 @dataclass
 class MediaInfo:
@@ -163,24 +158,19 @@ class TelegramAlbumTransfer:
                  source_chat_id: int,
                  target_chat_id: int,
                  temp_dir: str = "./temp_media",
-                 max_concurrent_album_downloads: int = 8,
-                 max_concurrent_media_downloads: int = 6,
-                 max_concurrent_upload_preps: int = 3,
+                 max_download_queue: int = 8,
+                 max_upload_queue: int = 3,
                  progress_db: str = "./transfer_progress.db",
                  batch_size: int = 1000):
         self.client = TelegramClient(session_name, api_id, api_hash)
         self.source_chat_id = source_chat_id
         self.target_chat_id = target_chat_id
         self.temp_dir = Path(temp_dir)
-        self.max_concurrent_album_downloads = max_concurrent_album_downloads
-        self.max_concurrent_media_downloads = max_concurrent_media_downloads
-        self.max_concurrent_upload_preps = max_concurrent_upload_preps
+        self.max_download_queue = max_download_queue
+        self.max_upload_queue = max_upload_queue
         self.batch_size = batch_size
         self.progress_tracker = ProgressTracker(progress_db)
         self.albums: Dict[int, AlbumInfo] = {}
-        self.single_medias: List[MediaInfo] = []
-        self.download_media_semaphore = asyncio.Semaphore(max_concurrent_media_downloads)
-        self.upload_send_lock = asyncio.Lock()  # só 1 send_file ativo de cada vez
         self.upload_delay = 7.0
         self.last_upload_time = 0
         self.request_delay = 3
@@ -228,13 +218,78 @@ class TelegramAlbumTransfer:
                 await self.scan_messages_chronological()
             else:
                 self.logger.info("Escaneamento já foi concluído anteriormente")
-            await self.process_albums_fifo_download_upload()
+            await self.process_with_three_queues()
             self.logger.info("Transferência concluída com sucesso!")
         except Exception as e:
             self.logger.error(f"Erro durante a transferência: {e}")
             raise
         finally:
             await self.cleanup()
+
+    async def process_with_three_queues(self):
+        sorted_albums = sorted(self.albums.values(), key=lambda x: x.date)
+        total = len(sorted_albums)
+
+        download_slots = asyncio.Semaphore(self.max_download_queue)
+        upload_slots = asyncio.Semaphore(self.max_upload_queue)
+        send_slot = asyncio.Semaphore(1)
+
+        download_cursor = 0
+        upload_cursor = 0
+        send_cursor = 0
+
+        download_condition = asyncio.Condition()
+        upload_condition = asyncio.Condition()
+        send_condition = asyncio.Condition()
+
+        async def download_worker(idx, album):
+            nonlocal download_cursor
+            async with download_condition:
+                while idx != download_cursor:
+                    await download_condition.wait()
+            async with download_slots:
+                await self.download_album_safe(album)
+                album.downloaded = True
+                await self.progress_tracker.save_album(album)
+            async with download_condition:
+                download_cursor += 1
+                download_condition.notify_all()
+
+        async def upload_worker(idx, album):
+            nonlocal upload_cursor
+            while True:
+                async with upload_condition:
+                    if idx == upload_cursor and album.downloaded:
+                        break
+                    await upload_condition.wait()
+            async with upload_slots:
+                await self.upload_album_corrected(album)
+                album.uploaded = True
+                await self.progress_tracker.save_album(album)
+                await self.cleanup_album_files(album)
+            async with upload_condition:
+                upload_cursor += 1
+                upload_condition.notify_all()
+
+        async def send_worker(idx, album):
+            nonlocal send_cursor
+            while True:
+                async with send_condition:
+                    if idx == send_cursor and album.uploaded:
+                        break
+                    await send_condition.wait()
+            async with send_slot:
+                self.logger.info(f"Álbum {album.grouped_id} FINALIZADO (download, upload e envio concluídos)")
+            async with send_condition:
+                send_cursor += 1
+                send_condition.notify_all()
+
+        tasks = []
+        for idx, album in enumerate(sorted_albums):
+            tasks.append(asyncio.create_task(download_worker(idx, album)))
+            tasks.append(asyncio.create_task(upload_worker(idx, album)))
+            tasks.append(asyncio.create_task(send_worker(idx, album)))
+        await asyncio.gather(*tasks)
 
     async def scan_messages_chronological(self):
         self.logger.info("Iniciando escaneamento cronológico completo...")
@@ -446,62 +501,6 @@ class TelegramAlbumTransfer:
             self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
             return None
 
-    async def process_albums_fifo_download_upload(self):
-        """
-        Downloads de álbuns limitados (máx 8 em paralelo).
-        Upload: prepara até 3 álbuns em paralelo, mas só 1 envia por vez (ordem garantida).
-        """
-        sorted_albums = sorted(self.albums.values(), key=lambda x: x.date)
-        total_albums = len(sorted_albums)
-        self.logger.info(f"Processando {total_albums} álbuns com limite de download/upload")
-
-        album_download_semaphore = asyncio.Semaphore(self.max_concurrent_album_downloads)
-        upload_prep_semaphore = asyncio.Semaphore(self.max_concurrent_upload_preps)
-
-        # Fila para garantir ordem absoluta de upload
-        upload_condition = asyncio.Condition()
-        upload_status = [False] * total_albums
-
-        async def download_album_controlled(idx, album: AlbumInfo):
-            async with album_download_semaphore:
-                await self.download_album_safe(album)
-                album.downloaded = True
-                await self.progress_tracker.save_album(album)
-
-        async def upload_album_worker(idx, album: AlbumInfo):
-            async with upload_prep_semaphore:
-                # Só envia quando todos anteriores já enviados (ordem garantida)
-                async with upload_condition:
-                    while idx > 0 and not upload_status[idx-1]:
-                        await upload_condition.wait()
-                # Só faz upload se baixado!
-                while not album.downloaded:
-                    await asyncio.sleep(0.5)
-                # Envio real (apenas 1 send_file ativo)
-                async with self.upload_send_lock:
-                    await self.upload_album_corrected(album)
-                    album.uploaded = True
-                    await self.progress_tracker.save_album(album)
-                    await self.cleanup_album_files(album)
-                # Marca como enviado e avisa o próximo
-                async with upload_condition:
-                    upload_status[idx] = True
-                    upload_condition.notify_all()
-
-        # Cria e inicia tasks para download de álbuns (limitado)
-        download_tasks = []
-        for idx, album in enumerate(sorted_albums):
-            if not album.downloaded:
-                download_tasks.append(asyncio.create_task(download_album_controlled(idx, album)))
-        await asyncio.gather(*download_tasks)
-
-        # Upload: prepara até 3 em paralelo, envia só 1 por vez e em ordem
-        upload_tasks = []
-        for idx, album in enumerate(sorted_albums):
-            if not album.uploaded:
-                upload_tasks.append(asyncio.create_task(upload_album_worker(idx, album)))
-        await asyncio.gather(*upload_tasks)
-
     async def download_album_safe(self, album: AlbumInfo):
         try:
             await asyncio.wait_for(
@@ -530,44 +529,43 @@ class TelegramAlbumTransfer:
                     await self.download_media(album.medias[idx])
 
     async def download_media(self, media: MediaInfo):
-        async with self.download_media_semaphore:
-            delay = 1
-            for attempt in range(10):
-                try:
-                    await asyncio.sleep(self.download_delay)
-                    message = await self.safe_telegram_call(self.client.get_messages, self.source_chat_id, ids=media.message_id)
-                    if message and message.media:
-                        input_location = None
-                        if hasattr(message.media, "document") and message.media.document:
-                            input_location = message.media.document
-                        elif hasattr(message.media, "photo") and message.media.photo:
-                            input_location = message.media.photo
-                        else:
-                            input_location = message.media
-                        await self.safe_telegram_call(
-                            self.client.download_file,
-                            input_location,
-                            file=media.local_path,
-                            part_size_kb=4096
-                        )
-                        if os.path.exists(media.local_path) and os.path.getsize(media.local_path) > 1000:
-                            media.downloaded = True
-                            self.logger.info(f"Baixado: {media.file_name}")
-                            return
-                        else:
-                            self.logger.warning(f"Arquivo baixado {media.local_path} parece inválido, re-tentando...")
+        delay = 1
+        for attempt in range(10):
+            try:
+                await asyncio.sleep(self.download_delay)
+                message = await self.safe_telegram_call(self.client.get_messages, self.source_chat_id, ids=media.message_id)
+                if message and message.media:
+                    input_location = None
+                    if hasattr(message.media, "document") and message.media.document:
+                        input_location = message.media.document
+                    elif hasattr(message.media, "photo") and message.media.photo:
+                        input_location = message.media.photo
                     else:
-                        self.logger.warning(f"Mensagem {media.message_id} não tem mídia, re-tentando...")
-                except (FloodWaitError, TimeoutError, asyncio.TimeoutError) as e:
-                    wait_time = getattr(e, 'seconds', delay)
-                    self.logger.warning(f"[FloodWait/Timeout] baixando mídia {media.message_id}, aguardando {wait_time}s")
-                    await asyncio.sleep(wait_time * self.flood_wait_multiplier + 1)
-                except Exception as e:
-                    self.logger.warning(f"Erro baixando mídia {media.message_id}, tentativa {attempt+1}: {e}")
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, 30)
-            raise RuntimeError(f"Não foi possível baixar mídia {media.message_id} após muitas tentativas.")
-        
+                        input_location = message.media
+                    await self.safe_telegram_call(
+                        self.client.download_file,
+                        input_location,
+                        file=media.local_path,
+                        part_size_kb=4096 # 4 MB
+                    )
+                    if os.path.exists(media.local_path) and os.path.getsize(media.local_path) > 1000:
+                        media.downloaded = True
+                        self.logger.info(f"Baixado: {media.file_name}")
+                        return
+                    else:
+                        self.logger.warning(f"Arquivo baixado {media.local_path} parece inválido, re-tentando...")
+                else:
+                    self.logger.warning(f"Mensagem {media.message_id} não tem mídia, re-tentando...")
+            except (FloodWaitError, TimeoutError, asyncio.TimeoutError) as e:
+                wait_time = getattr(e, 'seconds', delay)
+                self.logger.warning(f"[FloodWait/Timeout] baixando mídia {media.message_id}, aguardando {wait_time}s")
+                await asyncio.sleep(wait_time * self.flood_wait_multiplier + 1)
+            except Exception as e:
+                self.logger.warning(f"Erro baixando mídia {media.message_id}, tentativa {attempt+1}: {e}")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+        raise RuntimeError(f"Não foi possível baixar mídia {media.message_id} após muitas tentativas.")
+
     async def upload_album_corrected(self, album: AlbumInfo):
         self.logger.info(f"Enviando álbum {album.grouped_id}")
         time_since_last = time.time() - self.last_upload_time
@@ -626,19 +624,15 @@ async def main():
     SOURCE_CHAT_ID = -1001781722146
     TARGET_CHAT_ID = -1002608875175
     TEMP_DIR = "./temp_media"
-    MAX_CONCURRENT_ALBUM_DOWNLOADS = 8
-    MAX_CONCURRENT_MEDIA_DOWNLOADS = 6
-    MAX_CONCURRENT_UPLOAD_PREPS = 3
+    MAX_DOWNLOAD_QUEUE = 8
+    MAX_UPLOAD_QUEUE = 3
     PROGRESS_DB = "./transfer_progress.db"
     BATCH_SIZE = 200
-    print("🚀 Script Otimizado - Transferência de Álbuns do Telegram")
-    print("✅ Download paralelo de ÁLBUNS (máx 8), upload preparado em 3, envio 1 por vez.")
+    print("🚀 Script Otimizado - Três Filas (Download, Upload, Envio)")
     print(f"📁 Origem: {SOURCE_CHAT_ID}")
     print(f"📁 Destino: {TARGET_CHAT_ID}")
-    print(f"💾 Downloads de álbuns paralelos: {MAX_CONCURRENT_ALBUM_DOWNLOADS}")
-    print(f"💾 Downloads de mídias por álbum: {MAX_CONCURRENT_MEDIA_DOWNLOADS}")
-    print(f"⬆️ Uploads preparados paralelamente: {MAX_CONCURRENT_UPLOAD_PREPS}")
-    print(f"📦 Tamanho do lote: {BATCH_SIZE}")
+    print(f"💾 Downloads paralelos: {MAX_DOWNLOAD_QUEUE}")
+    print(f"⬆️ Uploads paralelos: {MAX_UPLOAD_QUEUE}")
     print(f"🗄️ Diretório temporário: {TEMP_DIR}")
     print(f"📊 Banco de progresso: {PROGRESS_DB}")
     transfer = TelegramAlbumTransfer(
@@ -648,9 +642,8 @@ async def main():
         source_chat_id=SOURCE_CHAT_ID,
         target_chat_id=TARGET_CHAT_ID,
         temp_dir=TEMP_DIR,
-        max_concurrent_album_downloads=MAX_CONCURRENT_ALBUM_DOWNLOADS,
-        max_concurrent_media_downloads=MAX_CONCURRENT_MEDIA_DOWNLOADS,
-        max_concurrent_upload_preps=MAX_CONCURRENT_UPLOAD_PREPS,
+        max_download_queue=MAX_DOWNLOAD_QUEUE,
+        max_upload_queue=MAX_UPLOAD_QUEUE,
         progress_db=PROGRESS_DB,
         batch_size=BATCH_SIZE
     )
@@ -667,7 +660,6 @@ async def main():
 if __name__ == "__main__":
     try:
         import telethon
-        import tqdm
     except ImportError as e:
         print("❌ Dependências não instaladas!")
         print("Execute: pip install telethon tqdm")
