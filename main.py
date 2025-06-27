@@ -459,24 +459,19 @@ class TelegramAlbumTransfer:
         if not pending_items:
             self.logger.info("Todos os itens já foram enviados!")
             return
-        
-        # Para cada álbum OU mídia individual, baixe todas as mídias do grupo (ou a única), SEM misturar downloads
+
+        # Corrigido: download e upload em sequência para cada item, respeitando a ordem
         for idx, item in enumerate(pending_items):
+            # Download
             if not item.downloaded:
                 self.logger.info(f"[Download] Preparando item {idx+1}/{len(pending_items)} (ID: {item.grouped_id})")
                 await self.download_album_safe(item)
                 item.downloaded = True
                 await self.progress_tracker.save_album(item)
-        
-        # Upload em batches paralelos, sempre respeitando a ordem
-        total = len(pending_items)
-        i = 0
-        while i < total:
-            batch = pending_items[i:i+self.max_concurrent_uploads]
-            self.logger.info(f"[Upload] Enviando itens {i+1}~{i+len(batch)} de {total} em paralelo...")
-            tasks = [self.upload_album_with_retry(item) for item in batch]
-            await asyncio.gather(*tasks)
-            i += self.max_concurrent_uploads
+            # Upload
+            if not item.uploaded:
+                self.logger.info(f"[Upload] Enviando item {idx+1}/{len(pending_items)} (ID: {item.grouped_id})")
+                await self.upload_album_with_retry(item)
 
     async def download_album_safe(self, album: AlbumInfo):
         try:
@@ -488,7 +483,6 @@ class TelegramAlbumTransfer:
             raise TimeoutError(f"Timeout baixando álbum {album.grouped_id}")
 
     async def download_album(self, album: AlbumInfo):
-        # Baixa todas as mídias desse álbum em paralelo, mas nunca mistura com outras
         self.logger.info(f"Baixando álbum/mídia {album.grouped_id} "
                         f"({len(album.medias)} mídias, {album.total_size / 1024 / 1024:.1f} MB)")
         album_dir = self.temp_dir / f"album_{album.grouped_id}"
