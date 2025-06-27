@@ -1,16 +1,8 @@
 #!/usr/bin/env python3
 """
 Versão otimizada do script de transferência de álbuns do Telegram.
-- Download paralelizado e confiável para álbuns (NÃO pode falhar!).
-- Retentativas infinitas para álbuns, com backoff exponencial.
-- Chunks de download dinâmicos (ajusta para arquivos grandes).
-- Logs claros sobre progresso e falhas.
-- Download de mídia individual com retentativas e verificação de integridade.
-- Upload seguro, também com retentativas.
-- Mantém ordem cronológica.
-- Melhora para evitar rate limit: delay entre downloads, limitação de paralelismo, log detalhado.
-- Utiliza sempre download_file para todas as mídias.
-- Envia álbuns e mídias individuais na ordem cronológica original, sem misturar downloads de álbuns diferentes.
+- Download paralelizado de álbuns (buffer).
+- Upload paralelizado de álbuns, mas sempre mantendo a ordem cronológica (respeita ordem da fila).
 """
 
 import asyncio
@@ -21,10 +13,10 @@ import shutil
 import sqlite3
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 import telethon
 print("Telethon version:", telethon.__version__)
@@ -161,7 +153,7 @@ class ProgressTracker:
             return result[0] if result else None
 
 class TelegramAlbumTransfer:
-    """Classe principal para transferência de álbuns e mídias individuais"""
+    """Classe principal para transferência de álbuns com fila e upload paralelo ordenado"""
     def __init__(self, 
                  api_id: int,
                  api_hash: str,
@@ -170,21 +162,20 @@ class TelegramAlbumTransfer:
                  target_chat_id: int,
                  temp_dir: str = "./temp_media",
                  max_concurrent_downloads: int = 6,
-                 max_concurrent_uploads: int = 6,
                  progress_db: str = "./transfer_progress.db",
-                 batch_size: int = 1000):
+                 batch_size: int = 1000,
+                 prefetch_albums: int = 8,
+                 max_concurrent_uploads: int = 3):
         self.client = TelegramClient(session_name, api_id, api_hash)
         self.source_chat_id = source_chat_id
         self.target_chat_id = target_chat_id
         self.temp_dir = Path(temp_dir)
         self.max_concurrent_downloads = max_concurrent_downloads
-        self.max_concurrent_uploads = max_concurrent_uploads
         self.batch_size = batch_size
         self.progress_tracker = ProgressTracker(progress_db)
         self.albums: Dict[int, AlbumInfo] = {}
         self.single_medias: List[MediaInfo] = []
         self.download_semaphore = asyncio.Semaphore(max_concurrent_downloads)
-        self.upload_semaphore = asyncio.Semaphore(max_concurrent_uploads)
         self.upload_delay = 7.0
         self.last_upload_time = 0
         self.request_delay = 3
@@ -192,6 +183,8 @@ class TelegramAlbumTransfer:
         self.flood_wait_multiplier = 1.7
         self.max_retries = 5
         self.download_delay = 0.8
+        self.prefetch_albums = prefetch_albums  # Quantos álbuns baixar antes de começar uploads (buffer/fila)
+        self.max_concurrent_uploads = max_concurrent_uploads
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -202,6 +195,178 @@ class TelegramAlbumTransfer:
         )
         self.logger = logging.getLogger(__name__)
         self.floodwait_log_count = 0
+
+    async def safe_telegram_call(self, func, *args, **kwargs):
+        for attempt in range(10):
+            try:
+                return await func(*args, **kwargs)
+            except FloodWaitError as e:
+                wait_time = getattr(e, 'seconds', 60)
+                self.floodwait_log_count += 1
+                self.logger.warning(f"[FloodWait #{self.floodwait_log_count}] FloodWait de {wait_time}s em {func.__name__}, aguardando...")
+                await asyncio.sleep(wait_time + 1)
+            except Exception as e:
+                self.logger.error(f"Erro inesperado em {func.__name__}: {e}")
+                if attempt == 9:
+                    raise
+                await asyncio.sleep(3)
+
+    async def start(self):
+        await self.client.start()
+        self.logger.info("Cliente Telegram conectado")
+        self.temp_dir.mkdir(exist_ok=True)
+        try:
+            self.albums = await self.progress_tracker.load_albums()
+            last_message_id = await self.progress_tracker.get_progress("last_processed_message")
+            if self.albums:
+                self.logger.info(f"Carregados {len(self.albums)} álbuns do progresso anterior")
+            if last_message_id != "completed":
+                self.logger.info("Iniciando escaneamento completo e ordenado...")
+                await self.scan_messages_chronological()
+            else:
+                self.logger.info("Escaneamento já foi concluído anteriormente")
+            await self.process_albums_chronological_with_parallel_uploads()
+            self.logger.info("Transferência concluída com sucesso!")
+        except Exception as e:
+            self.logger.error(f"Erro durante a transferência: {e}")
+            raise
+        finally:
+            await self.cleanup()
+
+    async def scan_messages_chronological(self):
+        self.logger.info("Iniciando escaneamento cronológico completo...")
+        try:
+            chat_info = await self.safe_telegram_call(self.client.get_entity, self.source_chat_id)
+            self.logger.info(f"Chat: {getattr(chat_info, 'title', 'Chat privado')}")
+        except Exception as e:
+            self.logger.warning(f"Não foi possível obter informações do chat: {e}")
+        self.logger.info("Coletando todas as mensagens com mídia...")
+        all_messages = []
+        message_count = 0
+        batch_count = 0
+        try:
+            async for message in self.client.iter_messages(
+                self.source_chat_id,
+                limit=None,
+                reverse=True
+            ):
+                message_count += 1
+                batch_count += 1
+                if hasattr(message, 'media') and message.media:
+                    all_messages.append(message)
+                if batch_count >= 200:
+                    await asyncio.sleep(1.2)
+                    batch_count = 0
+                if message_count % 5000 == 0:
+                    self.logger.info(f"Coletadas {message_count} mensagens...")
+        except FloodWaitError as e:
+            wait_time = getattr(e, 'seconds', 60)
+            self.logger.warning(f"FloodWait durante coleta: aguardando {wait_time}s")
+            await asyncio.sleep(wait_time + 1)
+        except Exception as e:
+            self.logger.error(f"Erro inesperado durante coleta de mensagens: {e}")
+            raise
+
+        self.logger.info(f"Coletadas {len(all_messages)} mensagens com mídia de {message_count} mensagens totais")
+
+        if all_messages:
+            self.logger.info(f"Primeira mensagem: ID={all_messages[0].id}, Data={all_messages[0].date}")
+            self.logger.info(f"Última mensagem: ID={all_messages[-1].id}, Data={all_messages[-1].date}")
+            for m in all_messages[:20]:
+                self.logger.info(f"MsgID {m.id} - date={m.date} grouped_id={getattr(m, 'grouped_id', None)}")
+        all_messages.sort(key=lambda x: x.date)
+        self.logger.info(f"Mensagens ordenadas cronologicamente")
+        await self.process_messages_for_albums(all_messages)
+        await self.progress_tracker.update_progress("last_processed_message", "completed")
+        self.logger.info(f"Escaneamento concluído: {len(self.albums)} álbuns encontrados")
+
+    async def process_messages_for_albums(self, messages: List[Message]):
+        self.logger.info(f"Processando {len(messages)} mensagens para identificar álbuns...")
+        album_groups = defaultdict(list)
+        loose_album_buffer = []
+        media_count = 0
+
+        def flush_loose_album():
+            if len(loose_album_buffer) >= 2:
+                grouped_id = -int(f"{int(loose_album_buffer[0].date.timestamp())}{loose_album_buffer[0].message_id}")
+                for m in loose_album_buffer:
+                    m.grouped_id = grouped_id
+                album_groups[grouped_id].extend(loose_album_buffer)
+            loose_album_buffer.clear()
+
+        previous = None
+        for i, message in enumerate(messages):
+            if i % 1000 == 0:
+                self.logger.info(f"Processando mensagem {i+1}/{len(messages)}")
+
+            media_info = await self.extract_media_info_safe(message)
+            if not media_info:
+                flush_loose_album()
+                previous = None
+                continue
+            media_count += 1
+
+            if media_info.grouped_id:
+                flush_loose_album()
+                album_groups[media_info.grouped_id].append(media_info)
+                previous = None
+            else:
+                if previous:
+                    same_day = media_info.date.date() == previous.date.date()
+                    same_type = media_info.media_type == previous.media_type
+                    time_gap = abs((media_info.date - previous.date).total_seconds()) < 180
+                    if same_day and same_type and time_gap:
+                        loose_album_buffer.append(media_info)
+                    else:
+                        flush_loose_album()
+                        loose_album_buffer.append(media_info)
+                else:
+                    loose_album_buffer.append(media_info)
+                previous = media_info
+        flush_loose_album()
+
+        self.logger.info(f"Encontradas {media_count} mídias, {len(album_groups)} grupos potenciais")
+
+        valid_albums = 0
+        batch_albums = []
+        for grouped_id, medias in album_groups.items():
+            if len(medias) >= 2:
+                medias.sort(key=lambda x: x.date)
+                caption = next((m.caption for m in medias if m.caption), None)
+                album = AlbumInfo(
+                    grouped_id=grouped_id,
+                    medias=medias,
+                    caption=caption,
+                    date=medias[0].date
+                )
+                self.albums[grouped_id] = album
+                batch_albums.append(album)
+                valid_albums += 1
+                if valid_albums <= 5:
+                    self.logger.info(f"Álbum {valid_albums}: ID={grouped_id}, "
+                        f"Data={medias[0].date.strftime('%Y-%m-%d %H:%M:%S')}, "
+                        f"Mídias={len(medias)}, "
+                        f"Tipos={[m.media_type for m in medias]}")
+                if len(batch_albums) >= 100:
+                    await self.progress_tracker.save_albums_batch(batch_albums)
+                    batch_albums = []
+        if batch_albums:
+            await self.progress_tracker.save_albums_batch(batch_albums)
+
+        self.logger.info(f"Álbuns válidos criados: {valid_albums}")
+        self.logger.info(f"Mídias individuais: {len(self.single_medias)}")
+
+        december_2023_albums = [
+            album for album in self.albums.values()
+            if album.date.year == 2023 and album.date.month == 12
+        ]
+        if december_2023_albums:
+            self.logger.info(f"Encontrados {len(december_2023_albums)} álbuns de dezembro de 2023:")
+            for album in december_2023_albums[:3]:
+                self.logger.info(f"  - Álbum {album.grouped_id}: {album.date.strftime('%Y-%m-%d %H:%M:%S')}, "
+                                 f"{len(album.medias)} mídias, tipos: {[m.media_type for m in album.medias]}")
+        else:
+            self.logger.warning("⚠️ Nenhum álbum de dezembro de 2023 encontrado!")
 
     async def extract_media_info_safe(self, message: Message) -> Optional[MediaInfo]:
         for attempt in range(self.max_retries):
@@ -278,200 +443,96 @@ class TelegramAlbumTransfer:
             self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
             return None
 
-    async def safe_telegram_call(self, func, *args, **kwargs):
-        for attempt in range(10):
-            try:
-                return await func(*args, **kwargs)
-            except FloodWaitError as e:
-                wait_time = getattr(e, 'seconds', 60)
-                self.floodwait_log_count += 1
-                self.logger.warning(f"[FloodWait #{self.floodwait_log_count}] FloodWait de {wait_time}s em {func.__name__}, aguardando...")
-                await asyncio.sleep(wait_time + 1)
-            except Exception as e:
-                self.logger.error(f"Erro inesperado em {func.__name__}: {e}")
-                if attempt == 9:
-                    raise
-                await asyncio.sleep(3)
-
-    async def start(self):
-        await self.client.start()
-        self.logger.info("Cliente Telegram conectado")
-        self.temp_dir.mkdir(exist_ok=True)
-        try:
-            self.albums = await self.progress_tracker.load_albums()
-            last_message_id = await self.progress_tracker.get_progress("last_processed_message")
-            if self.albums:
-                self.logger.info(f"Carregados {len(self.albums)} álbuns do progresso anterior")
-            if last_message_id != "completed":
-                self.logger.info("Iniciando escaneamento completo e ordenado...")
-                await self.scan_messages_chronological()
-            else:
-                self.logger.info("Escaneamento já foi concluído anteriormente")
-            await self.process_all_media_chronological()
-            self.logger.info("Transferência concluída com sucesso!")
-        except Exception as e:
-            self.logger.error(f"Erro durante a transferência: {e}")
-            raise
-        finally:
-            await self.cleanup()
-
-    async def scan_messages_chronological(self):
-        self.logger.info("Iniciando escaneamento cronológico completo...")
-        try:
-            chat_info = await self.safe_telegram_call(self.client.get_entity, self.source_chat_id)
-            self.logger.info(f"Chat: {getattr(chat_info, 'title', 'Chat privado')}")
-        except Exception as e:
-            self.logger.warning(f"Não foi possível obter informações do chat: {e}")
-        self.logger.info("Coletando todas as mensagens com mídia...")
-        all_messages = []
-        message_count = 0
-        batch_count = 0
-        try:
-            async for message in self.client.iter_messages(
-                self.source_chat_id,
-                limit=None,
-                reverse=True
-            ):
-                message_count += 1
-                batch_count += 1
-                if hasattr(message, 'media') and message.media:
-                    all_messages.append(message)
-                if batch_count >= 200:
-                    await asyncio.sleep(1.2)
-                    batch_count = 0
-                if message_count % 5000 == 0:
-                    self.logger.info(f"Coletadas {message_count} mensagens...")
-        except FloodWaitError as e:
-            wait_time = getattr(e, 'seconds', 60)
-            self.logger.warning(f"FloodWait durante coleta: aguardando {wait_time}s")
-            await asyncio.sleep(wait_time + 1)
-        except Exception as e:
-            self.logger.error(f"Erro inesperado durante coleta de mensagens: {e}")
-            raise
-
-        self.logger.info(f"Coletadas {len(all_messages)} mensagens com mídia de {message_count} mensagens totais")
-
-        if all_messages:
-            self.logger.info(f"Primeira mensagem: ID={all_messages[0].id}, Data={all_messages[0].date}")
-            self.logger.info(f"Última mensagem: ID={all_messages[-1].id}, Data={all_messages[-1].date}")
-            for m in all_messages[:20]:
-                self.logger.info(f"MsgID {m.id} - date={m.date} grouped_id={getattr(m, 'grouped_id', None)}")
-        all_messages.sort(key=lambda x: x.date)
-        self.logger.info(f"Mensagens ordenadas cronologicamente")
-        await self.process_messages_for_albums(all_messages)
-        await self.progress_tracker.update_progress("last_processed_message", "completed")
-        self.logger.info(f"Escaneamento concluído: {len(self.albums)} álbuns encontrados")
-
-    async def process_messages_for_albums(self, messages: List[Message]):
-        self.logger.info(f"Processando {len(messages)} mensagens para identificar álbuns e mídias individuais...")
-        album_groups = defaultdict(list)
-        loose_album_buffer = []
-        media_count = 0
-
-        def flush_loose_album():
-            if len(loose_album_buffer) >= 2:
-                grouped_id = -int(f"{int(loose_album_buffer[0].date.timestamp())}{loose_album_buffer[0].message_id}")
-                for m in loose_album_buffer:
-                    m.grouped_id = grouped_id
-                album_groups[grouped_id].extend(loose_album_buffer)
-            elif len(loose_album_buffer) == 1:
-                self.single_medias.append(loose_album_buffer[0])
-            loose_album_buffer.clear()
-
-        previous = None
-        for i, message in enumerate(messages):
-            if i % 1000 == 0:
-                self.logger.info(f"Processando mensagem {i+1}/{len(messages)}")
-
-            media_info = await self.extract_media_info_safe(message)
-            if not media_info:
-                flush_loose_album()
-                previous = None
-                continue
-            media_count += 1
-
-            if media_info.grouped_id:
-                flush_loose_album()
-                album_groups[media_info.grouped_id].append(media_info)
-                previous = None
-            else:
-                if previous:
-                    same_day = media_info.date.date() == previous.date.date()
-                    same_type = media_info.media_type == previous.media_type
-                    time_gap = abs((media_info.date - previous.date).total_seconds()) < 180
-                    if same_day and same_type and time_gap:
-                        loose_album_buffer.append(media_info)
-                    else:
-                        flush_loose_album()
-                        loose_album_buffer.append(media_info)
-                else:
-                    loose_album_buffer.append(media_info)
-                previous = media_info
-        flush_loose_album()
-
-        valid_albums = 0
-        batch_albums = []
-        for grouped_id, medias in album_groups.items():
-            if len(medias) >= 2:
-                medias.sort(key=lambda x: x.date)
-                # Garante que a mídia com legenda esteja em primeiro
-                medias_with_caption = [m for m in medias if m.caption]
-                medias_without_caption = [m for m in medias if not m.caption]
-                if medias_with_caption:
-                    medias = medias_with_caption + medias_without_caption
-                caption = medias_with_caption[0].caption if medias_with_caption else None
-                album = AlbumInfo(
-                    grouped_id=grouped_id,
-                    medias=medias,
-                    caption=caption,
-                    date=medias[0].date
-                )
-                self.albums[grouped_id] = album
-                batch_albums.append(album)
-                valid_albums += 1
-                if len(batch_albums) >= 100:
-                    await self.progress_tracker.save_albums_batch(batch_albums)
-                    batch_albums = []
-        if batch_albums:
-            await self.progress_tracker.save_albums_batch(batch_albums)
-
-        self.logger.info(f"Álbuns válidos criados: {valid_albums}")
-        self.logger.info(f"Mídias individuais: {len(self.single_medias)}")
-
-    async def process_all_media_chronological(self):
-        # Junta álbuns e mídias individuais e ordena por data
-        all_items: List[Union[AlbumInfo, MediaInfo]] = []
-        # Adiciona álbuns
-        all_items.extend(self.albums.values())
-        # Cada mídia individual é tratada como "mini-álbum" para reutilizar lógica
-        for m in self.single_medias:
-            pseudo_album = AlbumInfo(
-                grouped_id=-m.message_id,  # identificador único negativo
-                medias=[m],
-                caption=m.caption,
-                date=m.date
-            )
-            all_items.append(pseudo_album)
-        # Ordena tudo por data
-        all_items.sort(key=lambda x: x.date)
-        self.logger.info(f"Processando {len(all_items)} mídias/álbuns em ordem cronológica (inclusive individuais)")
-        pending_items = [item for item in all_items if not item.uploaded]
-        if not pending_items:
-            self.logger.info("Todos os itens já foram enviados!")
+    async def process_albums_chronological_with_parallel_uploads(self):
+        """Downloads paralelos de álbuns, uploads paralelos mas SEMPRE na ordem da fila."""
+        sorted_albums = sorted(self.albums.values(), key=lambda x: x.date)
+        pending_albums = [album for album in sorted_albums if not album.uploaded]
+        total = len(pending_albums)
+        self.logger.info(f"Processando {total} álbuns em ordem cronológica (upload paralelo ordenado)")
+        if not pending_albums:
+            self.logger.info("Todos os álbuns já foram enviados!")
             return
 
-        # Para cada álbum ou mídia individual: baixar todas as mídias do álbum em paralelo, depois fazer upload do álbum inteiro (mídia com legenda primeiro)
-        for idx, album in enumerate(pending_items):
-            if not album.downloaded:
-                self.logger.info(f"[Download Álbum] {idx+1}/{len(pending_items)} (ID: {album.grouped_id}) - Baixando {len(album.medias)} mídias")
-                await self.download_album_safe(album)
-                album.downloaded = True
-                await self.progress_tracker.save_album(album)
-            if not album.uploaded:
-                # Legenda na primeira mídia
-                album.medias.sort(key=lambda m: (m.caption is None, m.date))
-                self.logger.info(f"[Upload Álbum] {idx+1}/{len(pending_items)} (ID: {album.grouped_id}) - Enviando álbum")
-                await self.upload_album_with_retry(album)
+        upload_queue = deque()
+        download_tasks = {}
+        album_idx = 0
+
+        # Pré-carrega até prefetch_albums álbuns para download em paralelo
+        while album_idx < len(pending_albums) and len(download_tasks) < self.prefetch_albums:
+            album = pending_albums[album_idx]
+            self.logger.info(f"[Fila] Iniciando download do álbum {album_idx+1}/{total}, ID {album.grouped_id}")
+            task = asyncio.create_task(self.download_album_safe(album))
+            download_tasks[album.grouped_id] = (task, album)
+            album_idx += 1
+
+        # Vamos controlar a janela de uploads paralelos, mas respeitando a fila
+        uploads_in_progress = {}
+        upload_results = {}
+        next_upload_index = 0
+
+        while next_upload_index < total:
+            # Aguarda ao menos um álbum baixar por completo
+            if not upload_queue:
+                done, _ = await asyncio.wait(
+                    [t for t, _ in download_tasks.values()],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                for group_id, (task, album) in list(download_tasks.items()):
+                    if task in done:
+                        try:
+                            await task  # Propaga exceção se houve erro
+                            album.downloaded = True
+                            await self.progress_tracker.save_album(album)
+                            upload_queue.append(album)
+                            self.logger.info(f"[Fila] Álbum baixado e enfileirado para upload: {album.grouped_id}")
+                        except Exception as e:
+                            self.logger.error(f"Download de álbum {album.grouped_id} falhou: {e}")
+                            # Tenta baixar de novo ao final
+                            download_tasks[group_id] = (asyncio.create_task(self.download_album_safe(album)), album)
+                            continue
+                        del download_tasks[group_id]
+                # Mantém o buffer de downloads cheio
+                while album_idx < len(pending_albums) and len(download_tasks) < self.prefetch_albums:
+                    album = pending_albums[album_idx]
+                    self.logger.info(f"[Fila] Iniciando download do álbum {album_idx+1}/{total}, ID {album.grouped_id}")
+                    task = asyncio.create_task(self.download_album_safe(album))
+                    download_tasks[album.grouped_id] = (task, album)
+                    album_idx += 1
+
+            # Envia em paralelo até o limite, mas só álbuns no início da fila
+            while (len(uploads_in_progress) < self.max_concurrent_uploads and
+                   upload_queue and
+                   next_upload_index + len(uploads_in_progress) < total):
+                # Mantém a ordem: só pega o próximo álbum da fila
+                album = upload_queue.popleft()
+                idx = next_upload_index + len(uploads_in_progress)
+                self.logger.info(f"[UPLOAD-FILA] Slot {len(uploads_in_progress)+1}/{self.max_concurrent_uploads}: preparando envio do álbum {album.grouped_id} (posição {idx+1}/{total})")
+                upload_task = asyncio.create_task(self.upload_album_with_status(album, idx))
+                uploads_in_progress[idx] = (upload_task, album)
+
+            # Aguarda o upload mais antigo terminar, antes de liberar o próximo na ordem!
+            if uploads_in_progress:
+                # Espera o menor índice (primeiro da fila dos uploads)
+                idx_to_await = min(uploads_in_progress.keys())
+                task, album = uploads_in_progress[idx_to_await]
+                await task  # Garante ordem
+                upload_results[idx_to_await] = True
+                del uploads_in_progress[idx_to_await]
+                next_upload_index += 1
+
+    async def upload_album_with_status(self, album, idx):
+        # Garante ordem: só envia quando chamado, mas pode rodar em paralelo limitado
+        try:
+            await self.upload_album_corrected(album)
+            album.uploaded = True
+            await self.progress_tracker.save_album(album)
+            await self.cleanup_album_files(album)
+            self.logger.info(f"[UPLOAD-FILA] Álbum {album.grouped_id} enviado com sucesso (posição {idx+1})")
+        except Exception as e:
+            self.logger.error(f"[UPLOAD-FILA] Falha ao enviar álbum {album.grouped_id} (posição {idx+1}): {e}")
+            # Retentativa simples
+            await asyncio.sleep(10)
+            await self.upload_album_with_status(album, idx)
 
     async def download_album_safe(self, album: AlbumInfo):
         try:
@@ -483,7 +544,8 @@ class TelegramAlbumTransfer:
             raise TimeoutError(f"Timeout baixando álbum {album.grouped_id}")
 
     async def download_album(self, album: AlbumInfo):
-        self.logger.info(f"Baixando álbum/mídia {album.grouped_id} ({len(album.medias)} mídias, {album.total_size / 1024 / 1024:.1f} MB)")
+        self.logger.info(f"Baixando álbum {album.grouped_id} "
+                        f"({len(album.medias)} mídias, {album.total_size / 1024 / 1024:.1f} MB)")
         album_dir = self.temp_dir / f"album_{album.grouped_id}"
         album_dir.mkdir(exist_ok=True)
         download_tasks = []
@@ -498,8 +560,6 @@ class TelegramAlbumTransfer:
                 if isinstance(result, Exception):
                     self.logger.warning(f"Download falhou para {album.medias[idx].file_name}, re-tentando individualmente.")
                     await self.download_media(album.medias[idx])
-        for media in album.medias:
-            media.downloaded = True
 
     async def download_media(self, media: MediaInfo):
         async with self.download_semaphore:
@@ -540,27 +600,12 @@ class TelegramAlbumTransfer:
                 delay = min(delay * 2, 30)
             raise RuntimeError(f"Não foi possível baixar mídia {media.message_id} após muitas tentativas.")
         
-    async def upload_album_with_retry(self, album: AlbumInfo):
-        attempt = 0
-        while not album.uploaded:
-            try:
-                await self.upload_album_corrected(album)
-                album.uploaded = True
-                await self.progress_tracker.save_album(album)
-                await self.cleanup_album_files(album)
-                break
-            except Exception as e:
-                attempt += 1
-                wait = min(300, 5 + attempt * 10)
-                self.logger.error(f"Erro processando álbum/mídia {album.grouped_id}, tentativa {attempt}: {e}")
-                self.logger.warning(f"RETRYING álbum/mídia {album.grouped_id} depois de {wait}s (não pode falhar!)")
-                await asyncio.sleep(wait)
-
     async def upload_album_corrected(self, album: AlbumInfo):
-        self.logger.info(f"Enviando álbum/mídia {album.grouped_id}")
+        self.logger.info(f"Enviando álbum {album.grouped_id}")
         time_since_last = time.time() - self.last_upload_time
         if time_since_last < self.upload_delay:
             await asyncio.sleep(self.upload_delay - time_since_last)
+        album.medias.sort(key=lambda m: (m.caption is None, m.date))
         for attempt in range(10):
             try:
                 files_to_send = []
@@ -577,7 +622,7 @@ class TelegramAlbumTransfer:
                     supports_streaming=True
                 )
                 self.last_upload_time = time.time()
-                self.logger.info(f"Álbum/mídia {album.grouped_id} enviado com sucesso ({len(album.medias)} mídias)")
+                self.logger.info(f"Álbum {album.grouped_id} enviado com sucesso ({len(album.medias)} mídias)")
                 return
             except (FloodWaitError, SlowModeWaitError) as e:
                 wait_time = getattr(e, 'seconds', 60) * self.flood_wait_multiplier
@@ -615,15 +660,17 @@ async def main():
     TARGET_CHAT_ID = -1002608875175
     TEMP_DIR = "./temp_media"
     MAX_CONCURRENT_DOWNLOADS = 6
-    MAX_CONCURRENT_UPLOADS = 6
     PROGRESS_DB = "./transfer_progress.db"
     BATCH_SIZE = 200
-    print("🚀 Script Otimizado - Transferência de Álbuns do Telegram")
+    PREFETCH_ALBUMS = 8  # Quantos álbuns ficarão em buffer para download (ajuste conforme RAM/rede)
+    MAX_CONCURRENT_UPLOADS = 3  # Quantos uploads de álbum rodar em paralelo (mas sempre respeitando ordem da fila)
+    print("🚀 Script Otimizado - Transferência de Álbuns do Telegram (Upload Paralelo Ordenado)")
     print("✅ Download e upload confiáveis, paralelismo, retentativas infinitas para álbuns.")
     print(f"📁 Origem: {SOURCE_CHAT_ID}")
     print(f"📁 Destino: {TARGET_CHAT_ID}")
-    print(f"💾 Downloads paralelos: {MAX_CONCURRENT_DOWNLOADS}")
-    print(f"⬆️ Uploads paralelos: {MAX_CONCURRENT_UPLOADS}")
+    print(f"💾 Downloads paralelos por álbum: {MAX_CONCURRENT_DOWNLOADS}")
+    print(f"📦 Buffer de álbuns em download: {PREFETCH_ALBUMS}")
+    print(f"⬆️ Uploads paralelos de álbuns: {MAX_CONCURRENT_UPLOADS}")
     print(f"📦 Tamanho do lote: {BATCH_SIZE}")
     print(f"🗄️ Diretório temporário: {TEMP_DIR}")
     print(f"📊 Banco de progresso: {PROGRESS_DB}")
@@ -635,9 +682,10 @@ async def main():
         target_chat_id=TARGET_CHAT_ID,
         temp_dir=TEMP_DIR,
         max_concurrent_downloads=MAX_CONCURRENT_DOWNLOADS,
-        max_concurrent_uploads=MAX_CONCURRENT_UPLOADS,
         progress_db=PROGRESS_DB,
-        batch_size=BATCH_SIZE
+        batch_size=BATCH_SIZE,
+        prefetch_albums=PREFETCH_ALBUMS,
+        max_concurrent_uploads=MAX_CONCURRENT_UPLOADS
     )
     try:
         await transfer.start()
