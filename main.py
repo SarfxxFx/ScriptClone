@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Versão otimizada do script de transferência de álbuns do Telegram.
-Sistema de 3 filas: Download (8), Upload (3), Envio (1), pipeline real, com ordem absoluta, sem ultrapassagem.
+Sistema de 3 filas: Download (8), Upload (3), Envio (1), com ordem absoluta e sem ultrapassagem.
 """
 
 import asyncio
@@ -218,7 +218,7 @@ class TelegramAlbumTransfer:
                 await self.scan_messages_chronological()
             else:
                 self.logger.info("Escaneamento já foi concluído anteriormente")
-            await self.pipeline_with_three_queues()
+            await self.pipeline_strict_fifo()
             self.logger.info("Transferência concluída com sucesso!")
         except Exception as e:
             self.logger.error(f"Erro durante a transferência: {e}")
@@ -226,68 +226,77 @@ class TelegramAlbumTransfer:
         finally:
             await self.cleanup()
 
-    async def pipeline_with_three_queues(self):
+    async def pipeline_strict_fifo(self):
         sorted_albums = sorted(self.albums.values(), key=lambda x: x.date)
+        total = len(sorted_albums)
+        download_next = upload_next = send_next = 0
 
-        download_queue = asyncio.Queue()
-        upload_queue = asyncio.Queue()
-        send_queue = asyncio.Queue()
+        # Estados de cada estágio
+        download_done = [False] * total
+        upload_done = [False] * total
 
-        # Enfileira todos os álbuns para download, em ordem
-        for album in sorted_albums:
-            await download_queue.put(album)
+        # Estes locks garantem que só avança para o próximo estágio na ordem e até o limite do estágio
+        download_lock = asyncio.Lock()
+        upload_lock = asyncio.Lock()
+        send_lock = asyncio.Lock()
 
-        async def download_worker():
-            while True:
-                album = await download_queue.get()
-                try:
-                    await self.download_album_safe(album)
-                    album.downloaded = True
-                    await self.progress_tracker.save_album(album)
-                    await upload_queue.put(album)
-                except Exception as e:
-                    self.logger.error(f"[DOWNLOAD] Falha álbum {album.grouped_id}: {e}")
-                    await asyncio.sleep(5)
-                    await download_queue.put(album)
-                finally:
-                    download_queue.task_done()
+        async def download_manager():
+            nonlocal download_next
+            while download_next < total:
+                # Só enfileira até o limite de download simultâneo
+                cur_batch = []
+                for _ in range(self.max_download_queue):
+                    if download_next >= total:
+                        break
+                    idx = download_next
+                    cur_batch.append(idx)
+                    download_next += 1
+                tasks = [asyncio.create_task(self.download_album_safe(sorted_albums[idx])) for idx in cur_batch]
+                await asyncio.gather(*tasks)
+                for idx in cur_batch:
+                    sorted_albums[idx].downloaded = True
+                    await self.progress_tracker.save_album(sorted_albums[idx])
+                    download_done[idx] = True
 
-        async def upload_worker():
-            while True:
-                album = await upload_queue.get()
-                try:
-                    await self.upload_album_corrected(album)
-                    album.uploaded = True
-                    await self.progress_tracker.save_album(album)
-                    await self.cleanup_album_files(album)
-                    await send_queue.put(album)
-                except Exception as e:
-                    self.logger.error(f"[UPLOAD] Falha álbum {album.grouped_id}: {e}")
-                    await asyncio.sleep(5)
-                    await upload_queue.put(album)
-                finally:
-                    upload_queue.task_done()
+        async def upload_manager():
+            nonlocal upload_next
+            while upload_next < total:
+                # Espera a vez e a capacidade da fila de upload
+                can_upload = []
+                async with upload_lock:
+                    for _ in range(self.max_upload_queue):
+                        if upload_next >= total:
+                            break
+                        idx = upload_next
+                        # Só faz upload se o download desse álbum já foi concluído
+                        while not download_done[idx]:
+                            await asyncio.sleep(0.05)
+                        can_upload.append(idx)
+                        upload_next += 1
+                tasks = [asyncio.create_task(self.upload_album_corrected(sorted_albums[idx])) for idx in can_upload]
+                await asyncio.gather(*tasks)
+                for idx in can_upload:
+                    sorted_albums[idx].uploaded = True
+                    await self.progress_tracker.save_album(sorted_albums[idx])
+                    await self.cleanup_album_files(sorted_albums[idx])
+                    upload_done[idx] = True
 
-        async def send_worker():
-            while True:
-                album = await send_queue.get()
-                try:
-                    self.logger.info(f"Álbum {album.grouped_id} FINALIZADO (download, upload e envio concluídos)")
-                except Exception as e:
-                    self.logger.error(f"[ENVIO] Falha álbum {album.grouped_id}: {e}")
-                finally:
-                    send_queue.task_done()
+        async def send_manager():
+            nonlocal send_next
+            while send_next < total:
+                idx = send_next
+                # Só envia se upload já foi feito e se for de fato o próximo da fila (ordem absoluta)
+                while not upload_done[idx]:
+                    await asyncio.sleep(0.05)
+                async with send_lock:
+                    self.logger.info(f"Álbum {sorted_albums[idx].grouped_id} FINALIZADO (download, upload e envio concluídos)")
+                    send_next += 1
 
-        download_workers = [asyncio.create_task(download_worker()) for _ in range(self.max_download_queue)]
-        upload_workers = [asyncio.create_task(upload_worker()) for _ in range(self.max_upload_queue)]
-        send_workers = [asyncio.create_task(send_worker())]
-
-        await download_queue.join()
-        await upload_queue.join()
-        await send_queue.join()
-
-        for w in download_workers + upload_workers + send_workers:
-            w.cancel()
+        await asyncio.gather(
+            download_manager(),
+            upload_manager(),
+            send_manager(),
+        )
 
     async def scan_messages_chronological(self):
         self.logger.info("Iniciando escaneamento cronológico completo...")
