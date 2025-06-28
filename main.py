@@ -412,7 +412,7 @@ class TelegramAlbumTransfer:
             await self.progress_tracker.save_albums_batch(batch_albums)
 
         self.logger.info(f"Álbuns válidos criados: {valid_albums}")
-        self.logger.info(f"Mídias individuais: {len(self.single_medias)}")
+        # Removido: self.logger.info(f"Mídias individuais: {len(self.single_medias)}")
 
         december_2023_albums = [
             album for album in self.albums.values()
