@@ -6,6 +6,7 @@ CORREÇÃO: Implementação rigorosa de ordem cronológica e priorização por I
 AGORA: Processa a partir da primeira mensagem definida por link, e todas as seguintes em ordem cronológica.
 Agrupamento corrigido: só álbuns reais pelo grouped_id podem ter múltiplas mídias (até 10). 
 Cada mídia sem grouped_id é tratada como álbum solo (uma só mídia).
+Pipeline FIFO explícito: só promove para a próxima fila se for o primeiro da fila e estiver pronto.
 """
 
 import asyncio
@@ -342,7 +343,6 @@ class TelegramAlbumTransfer:
             if media_info.grouped_id:
                 album_groups[media_info.grouped_id].append(media_info)
             else:
-                # Cada mídia sem grouped_id é um álbum solo
                 solo_id = f"solo_{media_info.message_id}"
                 album_groups[solo_id].append(media_info)
 
@@ -358,12 +358,10 @@ class TelegramAlbumTransfer:
                                           min(m.message_id for m in x[1])))
         
         for grouped_id, medias in sorted_groups:
-            # Álbuns com grouped_id real do Telegram: máximo 10 mídias!
             if isinstance(grouped_id, int) or (isinstance(grouped_id, str) and not grouped_id.startswith("solo_")):
                 if len(medias) > 10:
                     self.logger.warning(f"Álbum {grouped_id} com mais de 10 mídias ({len(medias)}). Limitando às 10 primeiras.")
                     medias = medias[:10]
-            # Solo (1 mídia)
             album_id = grouped_id if isinstance(grouped_id, int) else medias[0].message_id
             album = AlbumInfo(
                 grouped_id=album_id,
@@ -412,117 +410,117 @@ class TelegramAlbumTransfer:
                     f"Data={album.date.strftime('%Y-%m-%d %H:%M:%S')}, "
                     f"Primeiro ID={min(m.message_id for m in album.medias)}"
                 )
-        for album in sorted_albums:
-            self.download_queue.append(album.grouped_id)
+        # FILAS FIFO EXPLÍCITAS
+        self.download_queue = deque([album.grouped_id for album in sorted_albums])
+        self.upload_queue = deque()
+        self.send_queue = deque()
         await asyncio.gather(
             self.download_manager(sorted_albums, queue_positions),
             self.upload_manager(sorted_albums, queue_positions),
             self.send_manager(sorted_albums, queue_positions),
         )
 
-    async def download_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
+    async def download_manager(self, sorted_albums, queue_positions):
         albums_dict = {album.grouped_id: album for album in sorted_albums}
-        while self.download_queue or self.download_active:
-            async with self.download_lock:
-                while len(self.download_active) < self.max_download_queue and self.download_queue:
-                    album_id = self.download_queue.popleft()
-                    album = albums_dict[album_id]
-                    if not album.downloaded:
-                        self.download_active.add(album_id)
-                        queue_positions[album_id].download_started = True
-                        self.logger.info(f"[DOWNLOAD] Iniciando álbum {album_id} (posição {queue_positions[album_id].original_index})")
-                        asyncio.create_task(self.download_worker(album, queue_positions[album_id]))
-                    else:
-                        queue_positions[album_id].download_completed = True
-                        self.logger.info(f"[DOWNLOAD] Álbum {album_id} já estava baixado")
-            await asyncio.sleep(0.1)
+        download_workers = {}
+        while self.download_queue:
+            ativos = [gid for gid in list(self.download_queue)[:self.max_download_queue]]
+            # Inicie downloads para álbuns ativos que não estejam baixando ainda
+            for gid in ativos:
+                album = albums_dict[gid]
+                pos = queue_positions[gid]
+                if not pos.download_started and not pos.download_completed:
+                    worker = asyncio.create_task(self.download_worker(album, pos))
+                    download_workers[gid] = worker
+                    pos.download_started = True
+            # Tente promover o PRIMEIRO da fila para upload SE estiver baixado e houver vaga na fila de upload
+            if len(self.upload_queue) < self.max_upload_queue and self.download_queue:
+                first_gid = self.download_queue[0]
+                pos = queue_positions[first_gid]
+                album = albums_dict[first_gid]
+                if pos.download_completed and all(m.downloaded for m in album.medias):
+                    # Promover para upload!
+                    self.upload_queue.append(first_gid)
+                    self.logger.info(f"[PIPELINE] Álbum {first_gid} promovido para fila de upload (posição {pos.original_index})")
+                    self.download_queue.popleft()
+            # Se todos downloads e promoções feitos, pare
+            if not self.download_queue and all(w.done() for w in download_workers.values()):
+                break
+            await asyncio.sleep(0.25)
 
     async def download_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
             await self.download_album_safe(album)
             album.downloaded = True
             await self.progress_tracker.save_album(album)
-            async with self.download_lock:
-                self.download_active.discard(album.grouped_id)
-                position.download_completed = True
+            position.download_completed = True
             self.logger.info(f"[DOWNLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
         except Exception as e:
             self.logger.error(f"[DOWNLOAD] Erro no álbum {album.grouped_id}: {e}")
-            async with self.download_lock:
-                self.download_active.discard(album.grouped_id)
 
-    async def upload_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
+    async def upload_manager(self, sorted_albums, queue_positions):
         albums_dict = {album.grouped_id: album for album in sorted_albums}
-        already_uploaded = set()
+        upload_workers = {}
         while True:
-            async with self.upload_lock:
-                for album in sorted_albums:
-                    pos = queue_positions[album.grouped_id]
-                    if (pos.download_completed and not pos.upload_started and album.grouped_id not in already_uploaded):
-                        # Verificar se todos os anteriores já foram upados:
-                        can_start = all(
-                            queue_positions[a.grouped_id].upload_completed
-                            for a in sorted_albums
-                            if queue_positions[a.grouped_id].original_index < pos.original_index
-                        )
-                        if can_start and len(self.upload_active) < self.max_upload_queue:
-                            self.upload_active.add(album.grouped_id)
-                            pos.upload_started = True
-                            self.logger.info(f"[UPLOAD] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
-                            asyncio.create_task(self.upload_worker(album, pos))
-                            already_uploaded.add(album.grouped_id)
-            all_completed = all(pos.send_completed for pos in queue_positions.values())
-            if all_completed:
+            ativos = [gid for gid in list(self.upload_queue)[:self.max_upload_queue]]
+            for gid in ativos:
+                album = albums_dict[gid]
+                pos = queue_positions[gid]
+                if not pos.upload_started and not pos.upload_completed:
+                    worker = asyncio.create_task(self.upload_worker(album, pos))
+                    upload_workers[gid] = worker
+                    pos.upload_started = True
+            # Tente promover o PRIMEIRO da fila de upload para envio SE upload concluído e houver vaga na fila de envio
+            if len(self.send_queue) < 1 and self.upload_queue:
+                first_gid = self.upload_queue[0]
+                pos = queue_positions[first_gid]
+                album = albums_dict[first_gid]
+                if pos.upload_completed and album.uploaded:
+                    self.send_queue.append(first_gid)
+                    self.logger.info(f"[PIPELINE] Álbum {first_gid} promovido para fila de envio (posição {pos.original_index})")
+                    self.upload_queue.popleft()
+            if not self.upload_queue and all(w.done() for w in upload_workers.values()):
                 break
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.25)
 
     async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
             await self.upload_album_corrected(album)
             album.uploaded = True
             await self.progress_tracker.save_album(album)
-            async with self.upload_lock:
-                self.upload_active.discard(album.grouped_id)
-                position.upload_completed = True
+            position.upload_completed = True
             self.logger.info(f"[UPLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
         except Exception as e:
             self.logger.error(f"[UPLOAD] Erro no álbum {album.grouped_id}: {e}")
-            async with self.upload_lock:
-                self.upload_active.discard(album.grouped_id)
 
-    async def send_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
-        already_sent = set()
+    async def send_manager(self, sorted_albums, queue_positions):
+        albums_dict = {album.grouped_id: album for album in sorted_albums}
+        send_workers = {}
         while True:
-            async with self.send_lock:
-                for album in sorted_albums:
-                    pos = queue_positions[album.grouped_id]
-                    if pos.upload_completed and not pos.send_completed and album.grouped_id not in already_sent:
-                        can_send = all(
-                            queue_positions[a.grouped_id].send_completed
-                            for a in sorted_albums
-                            if queue_positions[a.grouped_id].original_index < pos.original_index
-                        )
-                        if can_send and self.send_active is None:
-                            self.send_active = album.grouped_id
-                            self.logger.info(f"[ENVIO] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
-                            asyncio.create_task(self.send_worker(album, pos))
-                            already_sent.add(album.grouped_id)
-            all_sent = all(pos.send_completed for pos in queue_positions.values())
-            if all_sent:
+            if self.send_queue:
+                gid = self.send_queue[0]
+                pos = queue_positions[gid]
+                album = albums_dict[gid]
+                if not pos.send_completed and gid not in send_workers:
+                    worker = asyncio.create_task(self.send_worker(album, pos))
+                    send_workers[gid] = worker
+            # Quando envio termina, retire da fila
+            for gid, worker in list(send_workers.items()):
+                if worker.done():
+                    self.logger.info(f"[PIPELINE] Álbum {gid} removido da fila de envio")
+                    self.send_queue.popleft()
+                    del send_workers[gid]
+            if not self.send_queue and not send_workers:
                 break
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.25)
 
     async def send_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
-            async with self.send_lock:
-                self.send_active = None
-                position.send_completed = True
+            position.send_completed = True
             self.logger.info(f"[ENVIO] Concluído álbum {album.grouped_id} (posição {position.original_index})")
             await self.cleanup_album_files(album)
         except Exception as e:
             self.logger.error(f"[ENVIO] Erro no álbum {album.grouped_id}: {e}")
-            async with self.send_lock:
-                self.send_active = None
 
     async def extract_media_info_safe(self, message: Message) -> Optional[MediaInfo]:
         for attempt in range(self.max_retries):
