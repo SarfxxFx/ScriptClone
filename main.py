@@ -4,6 +4,8 @@ Versão otimizada do script de transferência de álbuns do Telegram.
 Sistema de 3 filas: Download (8), Upload (3), Envio (1), com ordem absoluta e sem ultrapassagem.
 CORREÇÃO: Implementação rigorosa de ordem cronológica e priorização por ID.
 AGORA: Processa a partir da primeira mensagem definida por link, e todas as seguintes em ordem cronológica.
+Agrupamento corrigido: só álbuns reais pelo grouped_id podem ter múltiplas mídias (até 10). 
+Cada mídia sem grouped_id é tratada como álbum solo (uma só mídia).
 """
 
 import asyncio
@@ -192,21 +194,15 @@ class TelegramAlbumTransfer:
         self.max_retries = 5
         self.download_delay = 0.8
         
-        # Sistema de filas com ordem rigorosa
-        self.download_queue = deque()  # Fila de download (máx 8 simultâneos)
-        self.upload_queue = deque()    # Fila de upload (máx 3 simultâneos)
-        self.send_queue = deque()      # Fila de envio (máx 1)
-        
-        # Controle de estado das filas
-        self.download_active = set()   # IDs dos álbuns sendo baixados
-        self.upload_active = set()     # IDs dos álbuns sendo enviados
-        self.send_active = None        # ID do álbum sendo enviado (ou None)
-        
-        # Locks para sincronização
+        self.download_queue = deque()
+        self.upload_queue = deque()
+        self.send_queue = deque()
+        self.download_active = set()
+        self.upload_active = set()
+        self.send_active = None
         self.download_lock = asyncio.Lock()
         self.upload_lock = asyncio.Lock()
         self.send_lock = asyncio.Lock()
-        
         logging.basicConfig(
             level=logging.INFO,
             format='%(asctime)s - %(levelname)s - %(message)s',
@@ -234,14 +230,10 @@ class TelegramAlbumTransfer:
                 await asyncio.sleep(3)
 
     async def get_first_message_from_link(self, message_link: str) -> Optional[Message]:
-        """Obtém a primeira mensagem a partir de um link do Telegram"""
         try:
-            # Extrair o ID da mensagem do link
-            # Formato: https://t.me/c/1781722146/185127
             parts = message_link.rstrip("/").split('/')
             message_id = int(parts[-1])
             self.logger.info(f"Obtendo primeira mensagem pelo ID: {message_id}")
-            # Buscar a mensagem específica
             message = await self.safe_telegram_call(
                 self.client.get_messages,
                 self.source_chat_id,
@@ -280,12 +272,8 @@ class TelegramAlbumTransfer:
             await self.cleanup()
 
     async def scan_messages_chronological(self):
-        """Escaneamento cronológico começando da primeira mensagem específica"""
         self.logger.info("Iniciando escaneamento cronológico completo...")
-
-        # Link da primeira mensagem desejada
         first_message_link = "https://t.me/c/1781722146/185127"
-        # Obter a primeira mensagem pelo link
         first_message = await self.get_first_message_from_link(first_message_link)
         if not first_message:
             self.logger.error("Não foi possível obter a mensagem inicial. Abortando.")
@@ -303,11 +291,10 @@ class TelegramAlbumTransfer:
         batch_count = 0
 
         try:
-            # Começar da primeira mensagem especificada
             async for message in self.client.iter_messages(
                 self.source_chat_id,
-                min_id=first_message.id - 1,  # Garante que começamos da mensagem especificada
-                reverse=True  # Ordem cronológica (antigas primeiro)
+                min_id=first_message.id - 1,
+                reverse=True
             ):
                 message_count += 1
                 batch_count += 1
@@ -334,7 +321,6 @@ class TelegramAlbumTransfer:
             for m in all_messages[:20]:
                 self.logger.info(f"MsgID {m.id} - date={m.date} grouped_id={getattr(m, 'grouped_id', None)}")
         
-        # Ordenar mensagens por timestamp e ID
         all_messages.sort(key=lambda x: (x.date.timestamp(), x.id))
         self.logger.info(f"Mensagens ordenadas cronologicamente")
         await self.process_messages_for_albums(all_messages)
@@ -344,51 +330,21 @@ class TelegramAlbumTransfer:
     async def process_messages_for_albums(self, messages: List[Message]):
         self.logger.info(f"Processando {len(messages)} mensagens para identificar álbuns...")
         album_groups = defaultdict(list)
-        loose_album_buffer = []
         media_count = 0
 
-        def flush_loose_album():
-            if len(loose_album_buffer) >= 2:
-                loose_album_buffer.sort(key=lambda x: x.message_id)
-                timestamp = loose_album_buffer[0].date.timestamp()
-                msg_id = loose_album_buffer[0].message_id
-                grouped_id = -int(f"{int(timestamp)}{msg_id:010}")
-                for m in loose_album_buffer:
-                    m.grouped_id = grouped_id
-                album_groups[grouped_id].extend(loose_album_buffer)
-            loose_album_buffer.clear()
-
-        messages.sort(key=lambda x: (x.date.timestamp(), x.id))
-
-        previous = None
         for i, message in enumerate(messages):
             if i % 1000 == 0:
                 self.logger.info(f"Processando mensagem {i+1}/{len(messages)}")
-
             media_info = await self.extract_media_info_safe(message)
             if not media_info:
-                flush_loose_album()
-                previous = None
                 continue
             media_count += 1
-
             if media_info.grouped_id:
-                flush_loose_album()
                 album_groups[media_info.grouped_id].append(media_info)
-                previous = None
             else:
-                if previous:
-                    same_second = abs((media_info.date - previous.date).total_seconds()) < 1
-                    same_type = media_info.media_type == previous.media_type
-                    if same_second and same_type:
-                        loose_album_buffer.append(media_info)
-                    else:
-                        flush_loose_album()
-                        loose_album_buffer.append(media_info)
-                else:
-                    loose_album_buffer.append(media_info)
-                previous = media_info
-        flush_loose_album()
+                # Cada mídia sem grouped_id é um álbum solo
+                solo_id = f"solo_{media_info.message_id}"
+                album_groups[solo_id].append(media_info)
 
         for grouped_id, medias in album_groups.items():
             medias.sort(key=lambda x: x.message_id)
@@ -402,36 +358,37 @@ class TelegramAlbumTransfer:
                                           min(m.message_id for m in x[1])))
         
         for grouped_id, medias in sorted_groups:
-            if len(medias) >= 2:
-                album = AlbumInfo(
-                    grouped_id=grouped_id,
-                    medias=medias,
-                    caption=next((m.caption for m in medias if m.caption), None),
-                    date=medias[0].date
+            # Álbuns com grouped_id real do Telegram: máximo 10 mídias!
+            if isinstance(grouped_id, int) or (isinstance(grouped_id, str) and not grouped_id.startswith("solo_")):
+                if len(medias) > 10:
+                    self.logger.warning(f"Álbum {grouped_id} com mais de 10 mídias ({len(medias)}). Limitando às 10 primeiras.")
+                    medias = medias[:10]
+            # Solo (1 mídia)
+            album_id = grouped_id if isinstance(grouped_id, int) else medias[0].message_id
+            album = AlbumInfo(
+                grouped_id=album_id,
+                medias=medias,
+                caption=next((m.caption for m in medias if m.caption), None),
+                date=medias[0].date
+            )
+            self.albums[album.grouped_id] = album
+            batch_albums.append(album)
+            valid_albums += 1
+            if valid_albums <= 5:
+                self.logger.info(
+                    f"Álbum {valid_albums}: ID={album.grouped_id}, "
+                    f"Data={medias[0].date.strftime('%Y-%m-%d %H:%M:%S')}, "
+                    f"Primeiro ID={medias[0].message_id}, "
+                    f"Mídias={len(medias)}"
                 )
-                self.albums[grouped_id] = album
-                batch_albums.append(album)
-                valid_albums += 1
-                
-                if valid_albums <= 5:
-                    self.logger.info(
-                        f"Álbum {valid_albums}: ID={grouped_id}, "
-                        f"Data={medias[0].date.strftime('%Y-%m-%d %H:%M:%S')}, "
-                        f"Primeiro ID={medias[0].message_id}, "
-                        f"Mídias={len(medias)}"
-                    )
-                    
-                if len(batch_albums) >= 100:
-                    await self.progress_tracker.save_albums_batch(batch_albums)
-                    batch_albums = []
-
+            if len(batch_albums) >= 100:
+                await self.progress_tracker.save_albums_batch(batch_albums)
+                batch_albums = []
         if batch_albums:
             await self.progress_tracker.save_albums_batch(batch_albums)
-
         self.logger.info(f"Álbuns válidos criados: {valid_albums}")
 
     async def pipeline_strict_order(self):
-        """Pipeline com ordem rigorosa - nenhum álbum pode ultrapassar outro"""
         sorted_albums = sorted(
             self.albums.values(),
             key=lambda x: (
@@ -440,11 +397,9 @@ class TelegramAlbumTransfer:
             )
         )
         total = len(sorted_albums)
-        
         self.logger.info(f"Iniciando pipeline com {total} álbuns em ordem cronológica rigorosa")
         self.logger.info("REGRAS: Download(8)->Upload(3)->Envio(1), SEM ultrapassagem")
         self.logger.info("Ordem: Timestamp -> Menor ID primeiro")
-        
         queue_positions = {}
         for i, album in enumerate(sorted_albums):
             queue_positions[album.grouped_id] = QueuePosition(
@@ -457,10 +412,8 @@ class TelegramAlbumTransfer:
                     f"Data={album.date.strftime('%Y-%m-%d %H:%M:%S')}, "
                     f"Primeiro ID={min(m.message_id for m in album.medias)}"
                 )
-        
         for album in sorted_albums:
             self.download_queue.append(album.grouped_id)
-        
         await asyncio.gather(
             self.download_manager(sorted_albums, queue_positions),
             self.upload_manager(sorted_albums, queue_positions),
@@ -469,13 +422,11 @@ class TelegramAlbumTransfer:
 
     async def download_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
         albums_dict = {album.grouped_id: album for album in sorted_albums}
-        
         while self.download_queue or self.download_active:
             async with self.download_lock:
                 while len(self.download_active) < self.max_download_queue and self.download_queue:
                     album_id = self.download_queue.popleft()
                     album = albums_dict[album_id]
-                    
                     if not album.downloaded:
                         self.download_active.add(album_id)
                         queue_positions[album_id].download_started = True
@@ -484,7 +435,6 @@ class TelegramAlbumTransfer:
                     else:
                         queue_positions[album_id].download_completed = True
                         self.logger.info(f"[DOWNLOAD] Álbum {album_id} já estava baixado")
-            
             await asyncio.sleep(0.1)
 
     async def download_worker(self, album: AlbumInfo, position: QueuePosition):
@@ -492,67 +442,38 @@ class TelegramAlbumTransfer:
             await self.download_album_safe(album)
             album.downloaded = True
             await self.progress_tracker.save_album(album)
-            
             async with self.download_lock:
                 self.download_active.discard(album.grouped_id)
                 position.download_completed = True
-                
             self.logger.info(f"[DOWNLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
-            await self.try_move_to_upload(album, position)
-            
         except Exception as e:
             self.logger.error(f"[DOWNLOAD] Erro no álbum {album.grouped_id}: {e}")
             async with self.download_lock:
                 self.download_active.discard(album.grouped_id)
 
-    async def try_move_to_upload(self, album: AlbumInfo, position: QueuePosition):
-        async with self.upload_lock:
-            if len(self.upload_active) < self.max_upload_queue:
-                can_move = True
-                for other_id, other_pos in [(aid, pos) for aid, pos in self.upload_queue]:
-                    if other_pos.original_index < position.original_index:
-                        can_move = False
-                        break
-                
-                if can_move:
-                    self.upload_queue.append((album.grouped_id, position))
-                    self.upload_active.add(album.grouped_id)
-                    position.upload_started = True
-                    self.logger.info(f"[UPLOAD] Movido para fila: álbum {album.grouped_id} (posição {position.original_index})")
-                    asyncio.create_task(self.upload_worker(album, position))
-                else:
-                    self.logger.info(f"[UPLOAD] Álbum {album.grouped_id} aguardando ordem (pos {position.original_index})")
-
     async def upload_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
         albums_dict = {album.grouped_id: album for album in sorted_albums}
-        
+        already_uploaded = set()
         while True:
             async with self.upload_lock:
-                albums_ready = []
                 for album in sorted_albums:
                     pos = queue_positions[album.grouped_id]
-                    if (pos.download_completed and 
-                        not pos.upload_started and 
-                        len(self.upload_active) < self.max_upload_queue):
-                        can_start = True
-                        for other_album in sorted_albums:
-                            other_pos = queue_positions[other_album.grouped_id]
-                            if (other_pos.original_index < pos.original_index and 
-                                not other_pos.upload_completed):
-                                can_start = False
-                                break
-                        if can_start:
-                            albums_ready.append((album, pos))
-                for album, pos in albums_ready:
-                    self.upload_active.add(album.grouped_id)
-                    pos.upload_started = True
-                    self.logger.info(f"[UPLOAD] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
-                    asyncio.create_task(self.upload_worker(album, pos))
-            
+                    if (pos.download_completed and not pos.upload_started and album.grouped_id not in already_uploaded):
+                        # Verificar se todos os anteriores já foram upados:
+                        can_start = all(
+                            queue_positions[a.grouped_id].upload_completed
+                            for a in sorted_albums
+                            if queue_positions[a.grouped_id].original_index < pos.original_index
+                        )
+                        if can_start and len(self.upload_active) < self.max_upload_queue:
+                            self.upload_active.add(album.grouped_id)
+                            pos.upload_started = True
+                            self.logger.info(f"[UPLOAD] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
+                            asyncio.create_task(self.upload_worker(album, pos))
+                            already_uploaded.add(album.grouped_id)
             all_completed = all(pos.send_completed for pos in queue_positions.values())
             if all_completed:
                 break
-                
             await asyncio.sleep(0.2)
 
     async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
@@ -560,57 +481,35 @@ class TelegramAlbumTransfer:
             await self.upload_album_corrected(album)
             album.uploaded = True
             await self.progress_tracker.save_album(album)
-            
             async with self.upload_lock:
                 self.upload_active.discard(album.grouped_id)
                 position.upload_completed = True
-            
             self.logger.info(f"[UPLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
-            await self.try_move_to_send(album, position)
-            
         except Exception as e:
             self.logger.error(f"[UPLOAD] Erro no álbum {album.grouped_id}: {e}")
             async with self.upload_lock:
                 self.upload_active.discard(album.grouped_id)
 
-    async def try_move_to_send(self, album: AlbumInfo, position: QueuePosition):
-        async with self.send_lock:
-            if self.send_active is None:
-                can_move = True
-                for other_pos in self.upload_queue:
-                    if other_pos[1].original_index < position.original_index and not other_pos[1].send_completed:
-                        can_move = False
-                        break
-                
-                if can_move:
-                    self.send_active = album.grouped_id
-                    self.logger.info(f"[ENVIO] Movido para fila: álbum {album.grouped_id} (posição {position.original_index})")
-                    asyncio.create_task(self.send_worker(album, position))
-
     async def send_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
+        already_sent = set()
         while True:
             async with self.send_lock:
-                if self.send_active is None:
-                    for album in sorted_albums:
-                        pos = queue_positions[album.grouped_id]
-                        if (pos.upload_completed and not pos.send_completed):
-                            can_send = True
-                            for other_album in sorted_albums:
-                                other_pos = queue_positions[other_album.grouped_id]
-                                if (other_pos.original_index < pos.original_index and 
-                                    not other_pos.send_completed):
-                                    can_send = False
-                                    break
-                            if can_send:
-                                self.send_active = album.grouped_id
-                                self.logger.info(f"[ENVIO] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
-                                asyncio.create_task(self.send_worker(album, pos))
-                                break
-            
+                for album in sorted_albums:
+                    pos = queue_positions[album.grouped_id]
+                    if pos.upload_completed and not pos.send_completed and album.grouped_id not in already_sent:
+                        can_send = all(
+                            queue_positions[a.grouped_id].send_completed
+                            for a in sorted_albums
+                            if queue_positions[a.grouped_id].original_index < pos.original_index
+                        )
+                        if can_send and self.send_active is None:
+                            self.send_active = album.grouped_id
+                            self.logger.info(f"[ENVIO] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
+                            asyncio.create_task(self.send_worker(album, pos))
+                            already_sent.add(album.grouped_id)
             all_sent = all(pos.send_completed for pos in queue_positions.values())
             if all_sent:
                 break
-                
             await asyncio.sleep(0.3)
 
     async def send_worker(self, album: AlbumInfo, position: QueuePosition):
@@ -618,10 +517,8 @@ class TelegramAlbumTransfer:
             async with self.send_lock:
                 self.send_active = None
                 position.send_completed = True
-            
             self.logger.info(f"[ENVIO] Concluído álbum {album.grouped_id} (posição {position.original_index})")
             await self.cleanup_album_files(album)
-            
         except Exception as e:
             self.logger.error(f"[ENVIO] Erro no álbum {album.grouped_id}: {e}")
             async with self.send_lock:
@@ -690,7 +587,6 @@ class TelegramAlbumTransfer:
                 else:
                     media_type = "document"
                     file_name = f"doc_{message.id}"
-
         except Exception as e:
             self.logger.warning(f"Erro processando atributos da mídia: {e}")
 
@@ -706,13 +602,10 @@ class TelegramAlbumTransfer:
 
     async def download_album_safe(self, album: AlbumInfo):
         self.logger.info(f"[DOWNLOAD] Iniciando álbum {album.grouped_id} ({len(album.medias)} mídias)")
-        
         for i, media in enumerate(album.medias):
             if media.downloaded:
                 continue
-                
             file_path = self.temp_dir / f"{album.grouped_id}_{i}_{media.file_name}"
-            
             for attempt in range(self.max_retries):
                 try:
                     message = await self.safe_telegram_call(
@@ -720,18 +613,15 @@ class TelegramAlbumTransfer:
                         self.source_chat_id,
                         ids=media.message_id
                     )
-                    
                     if not message or not hasattr(message, 'media'):
                         self.logger.warning(f"Mensagem {media.message_id} não encontrada ou sem mídia")
                         break
-                    
                     await asyncio.sleep(self.download_delay)
                     downloaded_file = await self.safe_telegram_call(
                         self.client.download_media,
                         message.media,
                         file=str(file_path)
                     )
-                    
                     if downloaded_file and os.path.exists(downloaded_file):
                         media.local_path = downloaded_file
                         media.downloaded = True
@@ -739,7 +629,6 @@ class TelegramAlbumTransfer:
                         break
                     else:
                         raise Exception("Arquivo não foi baixado corretamente")
-                        
                 except Exception as e:
                     self.logger.warning(f"[DOWNLOAD] Tentativa {attempt+1} falhou para {media.file_name}: {e}")
                     if attempt < self.max_retries - 1:
@@ -750,23 +639,19 @@ class TelegramAlbumTransfer:
 
     async def upload_album_corrected(self, album: AlbumInfo):
         self.logger.info(f"[UPLOAD] Iniciando álbum {album.grouped_id}")
-        
         current_time = time.time()
         time_since_last = current_time - self.last_upload_time
         if time_since_last < self.upload_delay:
             wait_time = self.upload_delay - time_since_last
             self.logger.info(f"[UPLOAD] Aguardando rate limit: {wait_time:.1f}s")
             await asyncio.sleep(wait_time)
-        
         try:
             media_files = []
             for media in album.medias:
                 if not media.local_path or not os.path.exists(media.local_path):
                     raise Exception(f"Arquivo local não encontrado: {media.file_name}")
                 media_files.append(media.local_path)
-            
             caption = album.caption or f"Álbum transferido - {album.date.strftime('%Y-%m-%d %H:%M:%S')}"
-            
             await self.safe_telegram_call(
                 self.client.send_file,
                 self.target_chat_id,
@@ -774,10 +659,8 @@ class TelegramAlbumTransfer:
                 caption=caption,
                 force_document=False
             )
-            
             self.last_upload_time = time.time()
             self.logger.info(f"[UPLOAD] Álbum {album.grouped_id} enviado com sucesso")
-            
         except Exception as e:
             self.logger.error(f"[UPLOAD] Erro enviando álbum {album.grouped_id}: {e}")
             raise
@@ -798,20 +681,16 @@ class TelegramAlbumTransfer:
                 self.logger.info("Diretório temporário removido")
         except Exception as e:
             self.logger.warning(f"Erro na limpeza final: {e}")
-        
         if self.client.is_connected():
             await self.client.disconnect()
             self.logger.info("Cliente Telegram desconectado")
 
 async def main():
-    """Função principal"""
-    # Configurações - AJUSTE AQUI
     API_ID = 20372456  # Seu API ID
-    API_HASH = "4bf8017e548b790415a11cc8ed1b9804"  # Sua API Hash
-    SESSION_NAME = "album_transfer_session"  # Nome da sessão
-    SOURCE_CHAT_ID = -1001781722146  # ID do chat de origem
-    TARGET_CHAT_ID = -1002608875175  # ID do chat de destino
-    
+    API_HASH = "4bf8017e548b790415a11cc8ed1b9804"
+    SESSION_NAME = "album_transfer_session"
+    SOURCE_CHAT_ID = -1001781722146
+    TARGET_CHAT_ID = -1002608875175
     transfer = TelegramAlbumTransfer(
         api_id=API_ID,
         api_hash=API_HASH,
@@ -823,7 +702,6 @@ async def main():
         temp_dir="./temp_media",
         progress_db="./transfer_progress.db"
     )
-    
     try:
         await transfer.start()
     except KeyboardInterrupt:
