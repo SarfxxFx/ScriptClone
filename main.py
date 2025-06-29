@@ -487,7 +487,7 @@ class TelegramAlbumTransfer:
             if not self.upload_queue and not upload_workers:
                 break
             await asyncio.sleep(0.25)
-            
+              
     async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
             await self.upload_album_corrected(album)
