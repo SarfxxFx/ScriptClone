@@ -27,7 +27,7 @@ print("Telethon version:", telethon.__version__)
 
 from telethon import TelegramClient
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, Message
-from telethon.errors import FloodWaitError, SlowModeWaitError, TimeoutError, RPCError
+from telethon.errors import FloodWaitError
 
 @dataclass
 class MediaInfo:
@@ -440,9 +440,8 @@ class TelegramAlbumTransfer:
                 album = albums_dict[first_gid]
                 if pos.download_completed and all(m.downloaded for m in album.medias):
                     # Promover para upload!
-                    self.upload_queue.append(first_gid)
+                    self.upload_queue.append(self.download_queue.popleft())
                     self.logger.info(f"[PIPELINE] Álbum {first_gid} promovido para fila de upload (posição {pos.original_index})")
-                    self.download_queue.popleft()
             # Se todos downloads e promoções feitos, pare
             if not self.download_queue and all(w.done() for w in download_workers.values()):
                 break
@@ -463,30 +462,24 @@ class TelegramAlbumTransfer:
         upload_workers = {}
         total_albuns = len(sorted_albums)
         while True:
-            self.logger.info(f"[UPLOAD_MANAGER] upload_queue={list(self.upload_queue)} ativos={list(upload_workers.keys())}")
-            ativos = [gid for gid in list(self.upload_queue)[:self.max_upload_queue]]
-            for gid in ativos:
+            # Só processa o PRIMEIRO da fila de upload (nunca promove outros!)
+            if self.upload_queue:
+                gid = self.upload_queue[0]
                 album = albums_dict[gid]
                 pos = queue_positions[gid]
-                self.logger.info(f"[UPLOAD_MANAGER DEBUG] Album {gid} upload_started={pos.upload_started} upload_completed={pos.upload_completed} uploaded={album.uploaded}")
                 if not pos.upload_started and not pos.upload_completed and gid not in upload_workers:
-                    self.logger.info(f"[UPLOAD_MANAGER DEBUG] Pronto para iniciar upload do álbum {gid}: started={pos.upload_started}, completed={pos.upload_completed}, uploaded={album.uploaded}")
                     self.logger.info(f"[UPLOAD] Iniciando álbum {gid} (posição {pos.original_index})")
                     worker = asyncio.create_task(self.upload_worker(album, pos))
                     upload_workers[gid] = worker
                     pos.upload_started = True
-            # Promove para envio quando upload concluído e for o primeiro da fila de upload
-            if len(self.send_queue) < 1 and self.upload_queue:
-                first_gid = self.upload_queue[0]
-                pos = queue_positions[first_gid]
-                album = albums_dict[first_gid]
-                if pos.upload_completed and album.uploaded:
-                    self.send_queue.append(first_gid)
-                    self.logger.info(f"[PIPELINE] Álbum {first_gid} promovido para fila de envio (posição {pos.original_index})")
-                    self.upload_queue.popleft()
-            # Remove workers finalizados
+                # Só promove para envio se o PRIMEIRO da fila terminou e foi realmente upado
+                if len(self.send_queue) < 1:
+                    if pos.upload_completed and album.uploaded:
+                        self.send_queue.append(self.upload_queue.popleft())
+                        self.logger.info(f"[PIPELINE] Álbum {gid} promovido para fila de envio (posição {pos.original_index})")
+            # Limpa workers encerrados
             upload_workers = {gid: w for gid, w in upload_workers.items() if not w.done()}
-            # NOVO: Condição de parada robusta: só encerra quando TODOS os álbuns foram upados
+            # Parada
             all_completed = sum(1 for pos in queue_positions.values() if pos.upload_completed)
             if all_completed == total_albuns:
                 self.logger.info("[UPLOAD_MANAGER] Todos os álbuns upados. Encerrando upload_manager.")
@@ -508,12 +501,11 @@ class TelegramAlbumTransfer:
         send_workers = {}
         total_albuns = len(sorted_albums)
         while True:
-            self.logger.info(f"[SEND_MANAGER] send_queue={list(self.send_queue)} ativos={list(send_workers.keys())}")
+            # Só processa o PRIMEIRO da fila de envio (nunca promove outros!)
             if self.send_queue:
                 gid = self.send_queue[0]
                 album = albums_dict[gid]
                 pos = queue_positions[gid]
-                self.logger.info(f"[SEND_MANAGER DEBUG] Album {gid} send_completed={pos.send_completed}")
                 if not pos.send_completed and gid not in send_workers:
                     self.logger.info(f"[SEND] Iniciando álbum {gid} (posição {pos.original_index})")
                     worker = asyncio.create_task(self.send_worker(album, pos))
@@ -524,7 +516,6 @@ class TelegramAlbumTransfer:
                     self.logger.info(f"[SEND_MANAGER] Álbum {gid} enviado e removido da fila de envio")
                     self.send_queue.popleft()
                     del send_workers[gid]
-            # NOVO: Condição de parada robusta: só encerra quando TODOS os álbuns foram enviados
             all_completed = sum(1 for pos in queue_positions.values() if pos.send_completed)
             if all_completed == total_albuns:
                 self.logger.info("[SEND_MANAGER] Todos os álbuns enviados. Encerrando send_manager.")
