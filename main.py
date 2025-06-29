@@ -2,7 +2,6 @@
 """
 Versão otimizada do script de transferência de álbuns do Telegram.
 Sistema de 3 filas: Download (8), Upload (3), Envio (1), com ordem absoluta e sem ultrapassagem.
-Otimizado para começar da mensagem específica de 5/12/2023.
 """
 
 import asyncio
@@ -20,11 +19,11 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, asdict
 import telethon
 print("Telethon version:", telethon.__version__)
-print(f"Data/Hora Atual (UTC): 2025-06-29 01:35:49")
+print(f"Data/Hora Atual (UTC): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print(f"Usuário: Clown171")
 
 from telethon import TelegramClient
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, Message
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, Message, PeerChannel
 from telethon.errors import FloodWaitError, SlowModeWaitError, TimeoutError, RPCError
 
 @dataclass
@@ -192,21 +191,6 @@ class TelegramAlbumTransfer:
         self.logger = logging.getLogger(__name__)
         self.floodwait_log_count = 0
 
-    async def safe_telegram_call(self, func, *args, **kwargs):
-        for attempt in range(10):
-            try:
-                return await func(*args, **kwargs)
-            except FloodWaitError as e:
-                wait_time = getattr(e, 'seconds', 60)
-                self.floodwait_log_count += 1
-                self.logger.warning(f"[FloodWait #{self.floodwait_log_count}] FloodWait de {wait_time}s em {func.__name__}, aguardando...")
-                await asyncio.sleep(wait_time + 1)
-            except Exception as e:
-                self.logger.error(f"Erro inesperado em {func.__name__}: {e}")
-                if attempt == 9:
-                    raise
-                await asyncio.sleep(3)
-
     async def start(self):
         await self.client.start()
         self.logger.info("Cliente Telegram conectado")
@@ -229,135 +213,114 @@ class TelegramAlbumTransfer:
         finally:
             await self.cleanup()
 
-async def scan_messages_chronological(self):
-    self.logger.info("\n=== INICIANDO ESCANEAMENTO CRONOLÓGICO ===")
-    self.logger.info(f"Data/Hora UTC: {datetime.now(datetime.UTC).strftime('%Y-%m-%d %H:%M:%S')}")
+    async def scan_messages_chronological(self):
+        self.logger.info("\n=== INICIANDO ESCANEAMENTO CRONOLÓGICO ===")
+        self.logger.info(f"Data/Hora UTC: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Link da mensagem específica
-    MESSAGE_LINK = "https://t.me/c/1781722146/185127"  # Substitua pelo link real da sua mensagem
-    
-    self.logger.info("\n🔍 Tentando acessar mensagem pelo link...")
-    self.logger.info(f"Link: {MESSAGE_LINK}")
+        MESSAGE_LINK = "https://t.me/c/1781722146/185127"
+        
+        self.logger.info("\n🔍 Tentando acessar mensagem pelo link...")
+        self.logger.info(f"Link: {MESSAGE_LINK}")
 
-    try:
-        # Tentando resolver o link da mensagem
-        entity = await self.client.get_entity(MESSAGE_LINK)
-        message = await self.client.get_messages(entity, ids=185127)  # ID da mensagem do link
+        try:
+            # Primeiro, vamos obter a entidade do canal
+            channel = await self.client.get_entity(PeerChannel(self.source_chat_id))
+            if not channel:
+                raise ValueError("❌ Canal não encontrado!")
 
-        if not message:
-            raise ValueError("❌ Mensagem não encontrada pelo link!")
+            # Agora vamos pegar a mensagem específica
+            message = await self.client.get_messages(channel, ids=185127)
+            if not message:
+                raise ValueError("❌ Mensagem não encontrada!")
 
-        self.logger.info("✅ Mensagem encontrada!")
-        self.logger.info(f"ID: {message.id}")
-        self.logger.info(f"Data: {message.date}")
-        self.logger.info(f"Texto: {getattr(message, 'text', None)}")
-        self.logger.info(f"Grupo ID: {getattr(message, 'grouped_id', None)}")
+            self.logger.info("✅ Mensagem encontrada!")
+            self.logger.info(f"ID: {message.id}")
+            self.logger.info(f"Data: {message.date}")
+            self.logger.info(f"Texto: {getattr(message, 'text', None)}")
+            self.logger.info(f"Grupo ID: {getattr(message, 'grouped_id', None)}")
 
-        # Pegar todas as mensagens do mesmo grupo (álbum)
-        if not message.grouped_id:
-            raise ValueError("❌ A mensagem não faz parte de um álbum!")
+            if not message.grouped_id:
+                raise ValueError("❌ A mensagem não faz parte de um álbum!")
 
-        grouped_messages = await self.client.get_messages(
-            entity,
-            ids=[msg.id async for msg in self.client.iter_messages(
-                entity,
+            # Pegar todas as mensagens do mesmo grupo (álbum)
+            grouped_messages = []
+            async for msg in self.client.iter_messages(
+                channel,
                 min_id=message.id - 10,
                 max_id=message.id + 10
-            ) if getattr(msg, 'grouped_id', None) == message.grouped_id]
-        )
+            ):
+                if getattr(msg, 'grouped_id', None) == message.grouped_id:
+                    grouped_messages.append(msg)
 
-        if not grouped_messages:
-            raise ValueError("❌ Não foi possível encontrar as mensagens do álbum!")
+            if not grouped_messages:
+                raise ValueError("❌ Não foi possível encontrar as mensagens do álbum!")
 
-        self.logger.info(f"\n✅ Álbum encontrado com {len(grouped_messages)} mensagens")
+            self.logger.info(f"\n✅ Álbum encontrado com {len(grouped_messages)} mensagens")
 
-        # Continua com o processamento das mensagens subsequentes
-        all_messages = []
-        all_messages.extend(grouped_messages)
-        message_count = len(grouped_messages)
+            # Continua com o processamento das mensagens subsequentes
+            all_messages = []
+            all_messages.extend(grouped_messages)
+            message_count = len(grouped_messages)
 
-        self.logger.info("\n🔄 Coletando mensagens posteriores ao primeiro álbum...")
-        
-        async for next_message in self.client.iter_messages(
-            entity,
-            min_id=message.id,
-            reverse=True
-        ):
-            message_count += 1
+            self.logger.info("\n🔄 Coletando mensagens posteriores ao primeiro álbum...")
             
-            if hasattr(next_message, 'media') and next_message.media:
-                all_messages.append(next_message)
+            async for next_message in self.client.iter_messages(
+                channel,
+                min_id=message.id,
+                reverse=True
+            ):
+                message_count += 1
                 
-                if len(all_messages) % 100 == 0:
-                    self.logger.info(f"📊 Progresso: {len(all_messages)} mensagens com mídia")
+                if hasattr(next_message, 'media') and next_message.media:
+                    all_messages.append(next_message)
+                    
+                    if len(all_messages) % 100 == 0:
+                        self.logger.info(f"📊 Progresso: {len(all_messages)} mensagens com mídia")
+                
+                if message_count % 200 == 0:
+                    await asyncio.sleep(1.2)
+
+            self.logger.info(f"\n✅ Coleta concluída: {len(all_messages)} mensagens com mídia")
+
+            # Processamento dos álbuns
+            await self.process_messages_for_albums(all_messages)
             
-            if message_count % 200 == 0:
-                await asyncio.sleep(1.2)
+            await self.progress_tracker.update_progress("last_processed_message", "completed")
+            self.logger.info(f"\n✅ Escaneamento concluído com sucesso!")
+            self.logger.info(f"📊 Total de álbuns encontrados: {len(self.albums)}")
 
-        self.logger.info(f"\n✅ Coleta concluída: {len(all_messages)} mensagens com mídia")
+        except Exception as e:
+            self.logger.error(f"\n❌ Erro durante o escaneamento: {str(e)}")
+            raise
 
-        # Processamento dos álbuns com a ordem garantida
-        self.logger.info("\n🔄 Processando álbuns...")
-        await self.process_messages_for_albums(all_messages)
-        
-        # Atualização do progresso
-        await self.progress_tracker.update_progress("last_processed_message", "completed")
-        self.logger.info(f"\n✅ Escaneamento concluído com sucesso!")
-        self.logger.info(f"📊 Total de álbuns encontrados: {len(self.albums)}")
-
-    except ValueError as e:
-        self.logger.error(f"\n❌ Erro: {str(e)}")
-        raise
-    except Exception as e:
-        self.logger.error(f"\n❌ Erro inesperado: {str(e)}")
-        raise
+    async def safe_telegram_call(self, func, *args, **kwargs):
+        for attempt in range(10):
+            try:
+                return await func(*args, **kwargs)
+            except FloodWaitError as e:
+                wait_time = getattr(e, 'seconds', 60)
+                self.floodwait_log_count += 1
+                self.logger.warning(f"[FloodWait #{self.floodwait_log_count}] FloodWait de {wait_time}s em {func.__name__}, aguardando...")
+                await asyncio.sleep(wait_time + 1)
+            except Exception as e:
+                self.logger.error(f"Erro inesperado em {func.__name__}: {e}")
+                if attempt == 9:
+                    raise
+                await asyncio.sleep(3)
 
     async def process_messages_for_albums(self, messages: List[Message]):
         self.logger.info(f"Processando {len(messages)} mensagens para identificar álbuns...")
         album_groups = defaultdict(list)
-        loose_album_buffer = []
         media_count = 0
 
-        def flush_loose_album():
-            if len(loose_album_buffer) >= 2:
-                grouped_id = -int(f"{int(loose_album_buffer[0].date.timestamp())}{loose_album_buffer[0].message_id}")
-                for m in loose_album_buffer:
-                    m.grouped_id = grouped_id
-                album_groups[grouped_id].extend(loose_album_buffer)
-            loose_album_buffer.clear()
-
-        previous = None
-        for i, message in enumerate(messages):
-            if i % 1000 == 0:
-                self.logger.info(f"Processando mensagem {i+1}/{len(messages)}")
-
+        for message in messages:
             media_info = await self.extract_media_info_safe(message)
-            if not media_info:
-                flush_loose_album()
-                previous = None
-                continue
-            media_count += 1
+            if media_info:
+                media_count += 1
+                if media_info.grouped_id:
+                    album_groups[media_info.grouped_id].append(media_info)
 
-            if media_info.grouped_id:
-                flush_loose_album()
-                album_groups[media_info.grouped_id].append(media_info)
-                previous = None
-            else:
-                if previous:
-                    same_day = media_info.date.date() == previous.date.date()
-                    same_type = media_info.media_type == previous.media_type
-                    time_gap = abs((media_info.date - previous.date).total_seconds()) < 180
-                    if same_day and same_type and time_gap:
-                        loose_album_buffer.append(media_info)
-                    else:
-                        flush_loose_album()
-                        loose_album_buffer.append(media_info)
-                else:
-                    loose_album_buffer.append(media_info)
-                previous = media_info
-        flush_loose_album()
-
-        self.logger.info(f"Encontradas {media_count} mídias, {len(album_groups)} grupos potenciais")
+        self.logger.info(f"Encontradas {media_count} mídias, {len(album_groups)} grupos")
 
         valid_albums = 0
         batch_albums = []
@@ -374,14 +337,11 @@ async def scan_messages_chronological(self):
                 self.albums[grouped_id] = album
                 batch_albums.append(album)
                 valid_albums += 1
-                if valid_albums <= 5:
-                    self.logger.info(f"Álbum {valid_albums}: ID={grouped_id}, "
-                        f"Data={medias[0].date.strftime('%Y-%m-%d %H:%M:%S')}, "
-                        f"Mídias={len(medias)}, "
-                        f"Tipos={[m.media_type for m in medias]}")
+
                 if len(batch_albums) >= 100:
                     await self.progress_tracker.save_albums_batch(batch_albums)
                     batch_albums = []
+
         if batch_albums:
             await self.progress_tracker.save_albums_batch(batch_albums)
 
@@ -440,7 +400,7 @@ async def scan_messages_chronological(self):
                         break
                     await send_condition.wait()
             async with send_slot:
-                self.logger.info(f"Álbum {album.grouped_id} FINALIZADO (download, upload e envio concluídos)")
+                self.logger.info(f"Álbum {album.grouped_id} FINALIZADO")
             async with send_condition:
                 send_cursor += 1
                 send_condition.notify_all()
@@ -453,22 +413,17 @@ async def scan_messages_chronological(self):
         await asyncio.gather(*tasks)
 
     async def extract_media_info_safe(self, message: Message) -> Optional[MediaInfo]:
-        for attempt in range(self.max_retries):
-            try:
-                return await asyncio.wait_for(
-                    self.extract_media_info(message),
-                    timeout=self.timeout
-                )
-            except asyncio.TimeoutError:
-                self.logger.warning(f"Timeout extraindo mídia da mensagem {message.id}")
-                if attempt < self.max_retries - 1:
-                    await asyncio.sleep(1)
-                else:
-                    return None
-            except Exception as e:
-                self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
-                return None
-        return None
+        try:
+            return await asyncio.wait_for(
+                self.extract_media_info(message),
+                timeout=self.timeout
+            )
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Timeout extraindo mídia da mensagem {message.id}")
+            return None
+        except Exception as e:
+            self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
+            return None
 
     async def extract_media_info(self, message: Message) -> Optional[MediaInfo]:
         if not hasattr(message, 'media') or not message.media:
@@ -526,7 +481,7 @@ async def scan_messages_chronological(self):
         except Exception as e:
             self.logger.warning(f"Erro extraindo mídia da mensagem {message.id}: {e}")
             return None
-        
+
     async def download_album_safe(self, album: AlbumInfo):
         try:
             await asyncio.wait_for(
@@ -572,7 +527,7 @@ async def scan_messages_chronological(self):
                         self.client.download_file,
                         input_location,
                         file=media.local_path,
-                        part_size_kb=4096 # 4 MB
+                        part_size_kb=4096
                     )
                     if os.path.exists(media.local_path) and os.path.getsize(media.local_path) > 1000:
                         media.downloaded = True
