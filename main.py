@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Versão otimizada do script de transferência de álbuns do Telegram.
-Sistema de 3 filas: Download (10), Upload (10), Envio (10), com ordem absoluta e sem ultrapassagem.
+Sistema de 3 filas: Download (10), Upload (10), Envio (1), com ordem absoluta e sem ultrapassagem.
 CORREÇÃO: Implementação rigorosa de ordem cronológica e priorização por ID.
 AGORA: Processa a partir da primeira mensagem definida por link, e todas as seguintes em ordem cronológica.
 Agrupamento corrigido: só álbuns reais pelo grouped_id podem ter múltiplas mídias (até 10). 
