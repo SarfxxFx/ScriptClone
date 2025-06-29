@@ -462,15 +462,18 @@ class TelegramAlbumTransfer:
         albums_dict = {album.grouped_id: album for album in sorted_albums}
         upload_workers = {}
         while True:
+            # Só processa uploads para os primeiros 3 da fila de upload
             ativos = [gid for gid in list(self.upload_queue)[:self.max_upload_queue]]
             for gid in ativos:
                 album = albums_dict[gid]
                 pos = queue_positions[gid]
-                if not pos.upload_started and not pos.upload_completed:
+                # Só inicia o upload se ainda não foi iniciado e não foi concluído
+                if not pos.upload_started and not pos.upload_completed and gid not in upload_workers:
+                    self.logger.info(f"[UPLOAD] Iniciando álbum {gid} (posição {pos.original_index})")
                     worker = asyncio.create_task(self.upload_worker(album, pos))
                     upload_workers[gid] = worker
                     pos.upload_started = True
-            # Tente promover o PRIMEIRO da fila de upload para envio SE upload concluído e houver vaga na fila de envio
+            # Promove para envio quando upload concluído e for o primeiro da fila de upload
             if len(self.send_queue) < 1 and self.upload_queue:
                 first_gid = self.upload_queue[0]
                 pos = queue_positions[first_gid]
@@ -479,10 +482,12 @@ class TelegramAlbumTransfer:
                     self.send_queue.append(first_gid)
                     self.logger.info(f"[PIPELINE] Álbum {first_gid} promovido para fila de envio (posição {pos.original_index})")
                     self.upload_queue.popleft()
-            if not self.upload_queue and all(w.done() for w in upload_workers.values()):
+            # Remove workers finalizados
+            upload_workers = {gid: w for gid, w in upload_workers.items() if not w.done()}
+            if not self.upload_queue and not upload_workers:
                 break
             await asyncio.sleep(0.25)
-
+            
     async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
             await self.upload_album_corrected(album)
