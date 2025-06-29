@@ -467,9 +467,9 @@ class TelegramAlbumTransfer:
             for gid in ativos:
                 album = albums_dict[gid]
                 pos = queue_positions[gid]
-                self.logger.info(f"[UPLOAD_MANAGER DEBUG] Album {gid} upload_started={pos.upload_started} upload_completed={pos.upload_completed}")
+                self.logger.info(f"[UPLOAD_MANAGER DEBUG] Album {gid} upload_started={pos.upload_started} upload_completed={pos.upload_completed} uploaded={album.uploaded}")
                 if not pos.upload_started and not pos.upload_completed and gid not in upload_workers:
-                    self.logger.info(f"[UPLOAD_MANAGER DEBUG] Pronto para iniciar upload do álbum {gid}: started={pos.upload_started}, completed={pos.upload_completed}")
+                    self.logger.info(f"[UPLOAD_MANAGER DEBUG] Pronto para iniciar upload do álbum {gid}: started={pos.upload_started}, completed={pos.upload_completed}, uploaded={album.uploaded}")
                     self.logger.info(f"[UPLOAD] Iniciando álbum {gid} (posição {pos.original_index})")
                     worker = asyncio.create_task(self.upload_worker(album, pos))
                     upload_workers[gid] = worker
@@ -489,7 +489,7 @@ class TelegramAlbumTransfer:
             if not self.upload_queue and not upload_workers:
                 break
             await asyncio.sleep(0.25)
-
+            
     async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
             await self.upload_album_corrected(album)
