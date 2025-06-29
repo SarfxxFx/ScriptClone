@@ -3,7 +3,7 @@
 Versão otimizada do script de transferência de álbuns do Telegram.
 Sistema de 3 filas: Download (8), Upload (3), Envio (1), com ordem absoluta e sem ultrapassagem.
 CORREÇÃO: Implementação rigorosa de ordem cronológica e priorização por ID.
-Última atualização: 2025-06-29 02:47:36 UTC
+AGORA: Processa a partir da primeira mensagem definida por link, e todas as seguintes em ordem cronológica.
 """
 
 import asyncio
@@ -64,6 +64,105 @@ class QueuePosition:
     upload_completed: bool = False
     send_completed: bool = False
 
+class ProgressTracker:
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self.init_database()
+
+    def init_database(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS albums (
+                    grouped_id INTEGER PRIMARY KEY,
+                    album_data TEXT,
+                    processed BOOLEAN DEFAULT 0,
+                    downloaded BOOLEAN DEFAULT 0,
+                    uploaded BOOLEAN DEFAULT 0,
+                    date_created TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS progress (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_albums_status ON albums(processed, downloaded, uploaded)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_albums_date ON albums(date_created)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_progress_key ON progress(key)")
+
+    async def save_album(self, album: AlbumInfo):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO albums 
+                (grouped_id, album_data, processed, downloaded, uploaded, date_created)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                album.grouped_id,
+                json.dumps(asdict(album), default=str),
+                album.processed,
+                album.downloaded,
+                album.uploaded,
+                album.date.isoformat()
+            ))
+
+    async def save_albums_batch(self, albums: List[AlbumInfo]):
+        with sqlite3.connect(self.db_path) as conn:
+            data = [
+                (
+                    album.grouped_id,
+                    json.dumps(asdict(album), default=str),
+                    album.processed,
+                    album.downloaded,
+                    album.uploaded,
+                    album.date.isoformat()
+                )
+                for album in albums
+            ]
+            conn.executemany("""
+                INSERT OR REPLACE INTO albums 
+                (grouped_id, album_data, processed, downloaded, uploaded, date_created)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, data)
+
+    async def load_albums(self) -> Dict[int, AlbumInfo]:
+        albums = {}
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT album_data FROM albums 
+                ORDER BY date_created ASC
+            """)
+            for (album_data,) in cursor.fetchall():
+                try:
+                    data = json.loads(album_data)
+                    medias = []
+                    for media_data in data['medias']:
+                        media_data['date'] = datetime.fromisoformat(media_data['date'])
+                        medias.append(MediaInfo(**media_data))
+                    data['medias'] = medias
+                    data['date'] = datetime.fromisoformat(data['date'])
+                    album = AlbumInfo(**data)
+                    albums[album.grouped_id] = album
+                except Exception as e:
+                    logging.warning(f"Erro carregando álbum: {e}")
+                    continue
+        return albums
+
+    async def update_progress(self, key: str, value: str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO progress (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            """, (key, value))
+
+    async def get_progress(self, key: str) -> Optional[str]:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT value FROM progress WHERE key = ?", (key,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+
 class TelegramAlbumTransfer:
     def __init__(self, 
                  api_id: int,
@@ -119,116 +218,6 @@ class TelegramAlbumTransfer:
         self.logger = logging.getLogger(__name__)
         self.floodwait_log_count = 0
 
-    async def get_start_message_from_link(self):
-        """
-        Obtém a mensagem inicial a partir do link do Telegram.
-        Link formato: https://t.me/c/1781722146/185127
-        """
-        try:
-            # Tentar acessar a mensagem diretamente pelo link
-            message = await self.safe_telegram_call(
-                self.client.get_messages,
-                self.source_chat_id,
-                ids=185127  # ID da mensagem do link
-            )
-            
-            if not message:
-                raise Exception("Mensagem inicial não encontrada pelo link")
-                
-            self.logger.info(f"""
-            Mensagem inicial encontrada:
-            ID: {message.id}
-            Data: {message.date}
-            Tipo: {'Com mídia' if hasattr(message, 'media') and message.media else 'Sem mídia'}
-            """)
-            
-            return message
-            
-        except Exception as e:
-            self.logger.error(f"Erro ao acessar mensagem pelo link: {e}")
-            raise
-
-    async def scan_messages_chronological(self):
-        """Escaneamento cronológico começando da mensagem do link"""
-        self.logger.info("Iniciando escaneamento a partir do link da mensagem...")
-        
-        try:
-            # Obter a mensagem inicial pelo link
-            start_message = await self.get_start_message_from_link()
-            if not start_message:
-                raise Exception("Não foi possível acessar a mensagem inicial pelo link")
-                
-            self.logger.info("Coletando mensagens com mídia...")
-            all_messages = []
-            message_count = 0
-            batch_count = 0
-            
-            # Começar da mensagem do link e processar todas as posteriores
-            async for message in self.client.iter_messages(
-                self.source_chat_id,
-                min_id=start_message.id - 1,  # -1 para incluir a mensagem inicial
-                reverse=True  # Ordem cronológica
-            ):
-                message_count += 1
-                batch_count += 1
-                
-                # Processar mensagens com mídia
-                if hasattr(message, 'media') and message.media:
-                    all_messages.append(message)
-                    if len(all_messages) <= 5:  # Log das primeiras 5 mensagens
-                        self.logger.info(f"""
-                        Mensagem processada:
-                        ID: {message.id}
-                        Data: {message.date}
-                        Grupo ID: {getattr(message, 'grouped_id', 'N/A')}
-                        """)
-                
-                # Controle de rate limit
-                if batch_count >= 200:
-                    await asyncio.sleep(1.2)
-                    batch_count = 0
-                    
-                # Log de progresso
-                if message_count % 1000 == 0:
-                    self.logger.info(f"Processadas {message_count} mensagens, encontradas {len(all_messages)} com mídia")
-                    
-        except FloodWaitError as e:
-            wait_time = getattr(e, 'seconds', 60)
-            self.logger.warning(f"FloodWait durante coleta: aguardando {wait_time}s")
-            await asyncio.sleep(wait_time + 1)
-            raise
-        except Exception as e:
-            self.logger.error(f"Erro durante o processamento: {e}")
-            raise
-
-        self.logger.info(f"""
-        Coleta concluída:
-        Total de mensagens processadas: {message_count}
-        Mensagens com mídia encontradas: {len(all_messages)}
-        """)
-
-        if all_messages:
-            # Ordenar por data e ID
-            all_messages.sort(key=lambda x: (x.date.timestamp(), x.id))
-            
-            self.logger.info(f"""
-            Primeira mensagem da coleção:
-            ID: {all_messages[0].id}
-            Data: {all_messages[0].date}
-            
-            Última mensagem da coleção:
-            ID: {all_messages[-1].id}
-            Data: {all_messages[-1].date}
-            """)
-            
-            # Processar os álbuns
-            await self.process_messages_for_albums(all_messages)
-            await self.progress_tracker.update_progress("last_processed_message", "completed")
-            
-            self.logger.info(f"Processamento concluído: {len(self.albums)} álbuns encontrados")
-        else:
-            self.logger.warning("Nenhuma mensagem com mídia encontrada")
-
     async def safe_telegram_call(self, func, *args, **kwargs):
         for attempt in range(10):
             try:
@@ -244,6 +233,30 @@ class TelegramAlbumTransfer:
                     raise
                 await asyncio.sleep(3)
 
+    async def get_first_message_from_link(self, message_link: str) -> Optional[Message]:
+        """Obtém a primeira mensagem a partir de um link do Telegram"""
+        try:
+            # Extrair o ID da mensagem do link
+            # Formato: https://t.me/c/1781722146/185127
+            parts = message_link.rstrip("/").split('/')
+            message_id = int(parts[-1])
+            self.logger.info(f"Obtendo primeira mensagem pelo ID: {message_id}")
+            # Buscar a mensagem específica
+            message = await self.safe_telegram_call(
+                self.client.get_messages,
+                self.source_chat_id,
+                ids=message_id
+            )
+            if message:
+                self.logger.info(f"Primeira mensagem encontrada: ID={message.id}, Data={message.date}")
+                return message
+            else:
+                self.logger.error("Mensagem inicial não encontrada")
+                return None
+        except Exception as e:
+            self.logger.error(f"Erro ao obter primeira mensagem: {e}")
+            return None
+
     async def start(self):
         await self.client.start()
         self.logger.info("Cliente Telegram conectado")
@@ -254,7 +267,7 @@ class TelegramAlbumTransfer:
             if self.albums:
                 self.logger.info(f"Carregados {len(self.albums)} álbuns do progresso anterior")
             if last_message_id != "completed":
-                self.logger.info("Iniciando escaneamento completo e ordenado...")
+                self.logger.info("Iniciando escaneamento completo e ordenado a partir da primeira mensagem desejada...")
                 await self.scan_messages_chronological()
             else:
                 self.logger.info("Escaneamento já foi concluído anteriormente")
@@ -265,6 +278,68 @@ class TelegramAlbumTransfer:
             raise
         finally:
             await self.cleanup()
+
+    async def scan_messages_chronological(self):
+        """Escaneamento cronológico começando da primeira mensagem específica"""
+        self.logger.info("Iniciando escaneamento cronológico completo...")
+
+        # Link da primeira mensagem desejada
+        first_message_link = "https://t.me/c/1781722146/185127"
+        # Obter a primeira mensagem pelo link
+        first_message = await self.get_first_message_from_link(first_message_link)
+        if not first_message:
+            self.logger.error("Não foi possível obter a mensagem inicial. Abortando.")
+            return
+
+        try:
+            chat_info = await self.safe_telegram_call(self.client.get_entity, self.source_chat_id)
+            self.logger.info(f"Chat: {getattr(chat_info, 'title', 'Chat privado')}")
+        except Exception as e:
+            self.logger.warning(f"Não foi possível obter informações do chat: {e}")
+        
+        self.logger.info("Coletando todas as mensagens com mídia a partir do ID inicial...")
+        all_messages = []
+        message_count = 0
+        batch_count = 0
+
+        try:
+            # Começar da primeira mensagem especificada
+            async for message in self.client.iter_messages(
+                self.source_chat_id,
+                min_id=first_message.id - 1,  # Garante que começamos da mensagem especificada
+                reverse=True  # Ordem cronológica (antigas primeiro)
+            ):
+                message_count += 1
+                batch_count += 1
+                if hasattr(message, 'media') and message.media:
+                    all_messages.append(message)
+                if batch_count >= 200:
+                    await asyncio.sleep(1.2)
+                    batch_count = 0
+                if message_count % 5000 == 0:
+                    self.logger.info(f"Coletadas {message_count} mensagens...")
+        except FloodWaitError as e:
+            wait_time = getattr(e, 'seconds', 60)
+            self.logger.warning(f"FloodWait durante coleta: aguardando {wait_time}s")
+            await asyncio.sleep(wait_time + 1)
+        except Exception as e:
+            self.logger.error(f"Erro inesperado durante coleta de mensagens: {e}")
+            raise
+
+        self.logger.info(f"Coletadas {len(all_messages)} mensagens com mídia de {message_count} mensagens totais")
+
+        if all_messages:
+            self.logger.info(f"Primeira mensagem: ID={all_messages[0].id}, Data={all_messages[0].date}")
+            self.logger.info(f"Última mensagem: ID={all_messages[-1].id}, Data={all_messages[-1].date}")
+            for m in all_messages[:20]:
+                self.logger.info(f"MsgID {m.id} - date={m.date} grouped_id={getattr(m, 'grouped_id', None)}")
+        
+        # Ordenar mensagens por timestamp e ID
+        all_messages.sort(key=lambda x: (x.date.timestamp(), x.id))
+        self.logger.info(f"Mensagens ordenadas cronologicamente")
+        await self.process_messages_for_albums(all_messages)
+        await self.progress_tracker.update_progress("last_processed_message", "completed")
+        self.logger.info(f"Escaneamento concluído: {len(self.albums)} álbuns encontrados")
 
     async def process_messages_for_albums(self, messages: List[Message]):
         self.logger.info(f"Processando {len(messages)} mensagens para identificar álbuns...")
@@ -392,6 +467,166 @@ class TelegramAlbumTransfer:
             self.send_manager(sorted_albums, queue_positions),
         )
 
+    async def download_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
+        albums_dict = {album.grouped_id: album for album in sorted_albums}
+        
+        while self.download_queue or self.download_active:
+            async with self.download_lock:
+                while len(self.download_active) < self.max_download_queue and self.download_queue:
+                    album_id = self.download_queue.popleft()
+                    album = albums_dict[album_id]
+                    
+                    if not album.downloaded:
+                        self.download_active.add(album_id)
+                        queue_positions[album_id].download_started = True
+                        self.logger.info(f"[DOWNLOAD] Iniciando álbum {album_id} (posição {queue_positions[album_id].original_index})")
+                        asyncio.create_task(self.download_worker(album, queue_positions[album_id]))
+                    else:
+                        queue_positions[album_id].download_completed = True
+                        self.logger.info(f"[DOWNLOAD] Álbum {album_id} já estava baixado")
+            
+            await asyncio.sleep(0.1)
+
+    async def download_worker(self, album: AlbumInfo, position: QueuePosition):
+        try:
+            await self.download_album_safe(album)
+            album.downloaded = True
+            await self.progress_tracker.save_album(album)
+            
+            async with self.download_lock:
+                self.download_active.discard(album.grouped_id)
+                position.download_completed = True
+                
+            self.logger.info(f"[DOWNLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
+            await self.try_move_to_upload(album, position)
+            
+        except Exception as e:
+            self.logger.error(f"[DOWNLOAD] Erro no álbum {album.grouped_id}: {e}")
+            async with self.download_lock:
+                self.download_active.discard(album.grouped_id)
+
+    async def try_move_to_upload(self, album: AlbumInfo, position: QueuePosition):
+        async with self.upload_lock:
+            if len(self.upload_active) < self.max_upload_queue:
+                can_move = True
+                for other_id, other_pos in [(aid, pos) for aid, pos in self.upload_queue]:
+                    if other_pos.original_index < position.original_index:
+                        can_move = False
+                        break
+                
+                if can_move:
+                    self.upload_queue.append((album.grouped_id, position))
+                    self.upload_active.add(album.grouped_id)
+                    position.upload_started = True
+                    self.logger.info(f"[UPLOAD] Movido para fila: álbum {album.grouped_id} (posição {position.original_index})")
+                    asyncio.create_task(self.upload_worker(album, position))
+                else:
+                    self.logger.info(f"[UPLOAD] Álbum {album.grouped_id} aguardando ordem (pos {position.original_index})")
+
+    async def upload_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
+        albums_dict = {album.grouped_id: album for album in sorted_albums}
+        
+        while True:
+            async with self.upload_lock:
+                albums_ready = []
+                for album in sorted_albums:
+                    pos = queue_positions[album.grouped_id]
+                    if (pos.download_completed and 
+                        not pos.upload_started and 
+                        len(self.upload_active) < self.max_upload_queue):
+                        can_start = True
+                        for other_album in sorted_albums:
+                            other_pos = queue_positions[other_album.grouped_id]
+                            if (other_pos.original_index < pos.original_index and 
+                                not other_pos.upload_completed):
+                                can_start = False
+                                break
+                        if can_start:
+                            albums_ready.append((album, pos))
+                for album, pos in albums_ready:
+                    self.upload_active.add(album.grouped_id)
+                    pos.upload_started = True
+                    self.logger.info(f"[UPLOAD] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
+                    asyncio.create_task(self.upload_worker(album, pos))
+            
+            all_completed = all(pos.send_completed for pos in queue_positions.values())
+            if all_completed:
+                break
+                
+            await asyncio.sleep(0.2)
+
+    async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
+        try:
+            await self.upload_album_corrected(album)
+            album.uploaded = True
+            await self.progress_tracker.save_album(album)
+            
+            async with self.upload_lock:
+                self.upload_active.discard(album.grouped_id)
+                position.upload_completed = True
+            
+            self.logger.info(f"[UPLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
+            await self.try_move_to_send(album, position)
+            
+        except Exception as e:
+            self.logger.error(f"[UPLOAD] Erro no álbum {album.grouped_id}: {e}")
+            async with self.upload_lock:
+                self.upload_active.discard(album.grouped_id)
+
+    async def try_move_to_send(self, album: AlbumInfo, position: QueuePosition):
+        async with self.send_lock:
+            if self.send_active is None:
+                can_move = True
+                for other_pos in self.upload_queue:
+                    if other_pos[1].original_index < position.original_index and not other_pos[1].send_completed:
+                        can_move = False
+                        break
+                
+                if can_move:
+                    self.send_active = album.grouped_id
+                    self.logger.info(f"[ENVIO] Movido para fila: álbum {album.grouped_id} (posição {position.original_index})")
+                    asyncio.create_task(self.send_worker(album, position))
+
+    async def send_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
+        while True:
+            async with self.send_lock:
+                if self.send_active is None:
+                    for album in sorted_albums:
+                        pos = queue_positions[album.grouped_id]
+                        if (pos.upload_completed and not pos.send_completed):
+                            can_send = True
+                            for other_album in sorted_albums:
+                                other_pos = queue_positions[other_album.grouped_id]
+                                if (other_pos.original_index < pos.original_index and 
+                                    not other_pos.send_completed):
+                                    can_send = False
+                                    break
+                            if can_send:
+                                self.send_active = album.grouped_id
+                                self.logger.info(f"[ENVIO] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
+                                asyncio.create_task(self.send_worker(album, pos))
+                                break
+            
+            all_sent = all(pos.send_completed for pos in queue_positions.values())
+            if all_sent:
+                break
+                
+            await asyncio.sleep(0.3)
+
+    async def send_worker(self, album: AlbumInfo, position: QueuePosition):
+        try:
+            async with self.send_lock:
+                self.send_active = None
+                position.send_completed = True
+            
+            self.logger.info(f"[ENVIO] Concluído álbum {album.grouped_id} (posição {position.original_index})")
+            await self.cleanup_album_files(album)
+            
+        except Exception as e:
+            self.logger.error(f"[ENVIO] Erro no álbum {album.grouped_id}: {e}")
+            async with self.send_lock:
+                self.send_active = None
+
     async def extract_media_info_safe(self, message: Message) -> Optional[MediaInfo]:
         for attempt in range(self.max_retries):
             try:
@@ -470,7 +705,6 @@ class TelegramAlbumTransfer:
         )
 
     async def download_album_safe(self, album: AlbumInfo):
-        """Download seguro de um álbum completo"""
         self.logger.info(f"[DOWNLOAD] Iniciando álbum {album.grouped_id} ({len(album.medias)} mídias)")
         
         for i, media in enumerate(album.medias):
@@ -515,7 +749,6 @@ class TelegramAlbumTransfer:
                         raise
 
     async def upload_album_corrected(self, album: AlbumInfo):
-        """Upload de um álbum respeitando rate limits"""
         self.logger.info(f"[UPLOAD] Iniciando álbum {album.grouped_id}")
         
         current_time = time.time()
@@ -550,7 +783,6 @@ class TelegramAlbumTransfer:
             raise
 
     async def cleanup_album_files(self, album: AlbumInfo):
-        """Limpa arquivos locais de um álbum"""
         for media in album.medias:
             if media.local_path and os.path.exists(media.local_path):
                 try:
@@ -560,7 +792,6 @@ class TelegramAlbumTransfer:
                     self.logger.warning(f"Erro removendo arquivo {media.local_path}: {e}")
 
     async def cleanup(self):
-        """Limpeza final"""
         try:
             if self.temp_dir.exists():
                 shutil.rmtree(self.temp_dir)
@@ -571,285 +802,6 @@ class TelegramAlbumTransfer:
         if self.client.is_connected():
             await self.client.disconnect()
             self.logger.info("Cliente Telegram desconectado")
-
-    async def download_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
-        """Gerencia a fila de download - máximo 8 simultâneos, ordem rigorosa"""
-        albums_dict = {album.grouped_id: album for album in sorted_albums}
-        
-        while self.download_queue or self.download_active:
-            async with self.download_lock:
-                while len(self.download_active) < self.max_download_queue and self.download_queue:
-                    album_id = self.download_queue.popleft()
-                    album = albums_dict[album_id]
-                    
-                    if not album.downloaded:
-                        self.download_active.add(album_id)
-                        queue_positions[album_id].download_started = True
-                        self.logger.info(f"[DOWNLOAD] Iniciando álbum {album_id} (posição {queue_positions[album_id].original_index})")
-                        
-                        asyncio.create_task(self.download_worker(album, queue_positions[album_id]))
-                    else:
-                        queue_positions[album_id].download_completed = True
-                        self.logger.info(f"[DOWNLOAD] Álbum {album_id} já estava baixado")
-            
-            await asyncio.sleep(0.1)
-
-    async def download_worker(self, album: AlbumInfo, position: QueuePosition):
-        """Worker individual para download de um álbum"""
-        try:
-            await self.download_album_safe(album)
-            album.downloaded = True
-            await self.progress_tracker.save_album(album)
-            
-            async with self.download_lock:
-                self.download_active.discard(album.grouped_id)
-                position.download_completed = True
-                
-            self.logger.info(f"[DOWNLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
-            
-            await self.try_move_to_upload(album, position)
-            
-        except Exception as e:
-            self.logger.error(f"[DOWNLOAD] Erro no álbum {album.grouped_id}: {e}")
-            async with self.download_lock:
-                self.download_active.discard(album.grouped_id)
-
-    async def upload_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
-        """Gerencia a fila de upload - máximo 3 simultâneos, ordem rigorosa"""
-        albums_dict = {album.grouped_id: album for album in sorted_albums}
-        
-        while True:
-            async with self.upload_lock:
-                albums_ready = []
-                for album in sorted_albums:
-                    pos = queue_positions[album.grouped_id]
-                    if (pos.download_completed and 
-                        not pos.upload_started and 
-                        len(self.upload_active) < self.max_upload_queue):
-                        
-                        can_start = True
-                        for other_album in sorted_albums:
-                            other_pos = queue_positions[other_album.grouped_id]
-                            if (other_pos.original_index < pos.original_index and 
-                                not other_pos.upload_completed):
-                                can_start = False
-                                break
-                        
-                        if can_start:
-                            albums_ready.append((album, pos))
-                
-                for album, pos in albums_ready:
-                    self.upload_active.add(album.grouped_id)
-                    pos.upload_started = True
-                    self.logger.info(f"[UPLOAD] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
-                    asyncio.create_task(self.upload_worker(album, pos))
-            
-            all_completed = all(pos.send_completed for pos in queue_positions.values())
-            if all_completed:
-                break
-                
-            await asyncio.sleep(0.2)
-
-    async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
-        """Worker individual para upload de um álbum"""
-        try:
-            await self.upload_album_corrected(album)
-            album.uploaded = True
-            await self.progress_tracker.save_album(album)
-            
-            async with self.upload_lock:
-                self.upload_active.discard(album.grouped_id)
-                position.upload_completed = True
-            
-            self.logger.info(f"[UPLOAD] Concluído álbum {album.grouped_id} (posição {position.original_index})")
-            
-            await self.try_move_to_send(album, position)
-            
-        except Exception as e:
-            self.logger.error(f"[UPLOAD] Erro no álbum {album.grouped_id}: {e}")
-            async with self.upload_lock:
-                self.upload_active.discard(album.grouped_id)
-
-    async def send_manager(self, sorted_albums: List[AlbumInfo], queue_positions: Dict[int, QueuePosition]):
-        """Gerencia a fila de envio - apenas 1 por vez, ordem rigorosa"""
-        while True:
-            async with self.send_lock:
-                if self.send_active is None:
-                    for album in sorted_albums:
-                        pos = queue_positions[album.grouped_id]
-                        if (pos.upload_completed and not pos.send_completed):
-                            can_send = True
-                            for other_album in sorted_albums:
-                                other_pos = queue_positions[other_album.grouped_id]
-                                if (other_pos.original_index < pos.original_index and 
-                                    not other_pos.send_completed):
-                                    can_send = False
-                                    break
-                            
-                            if can_send:
-                                self.send_active = album.grouped_id
-                                self.logger.info(f"[ENVIO] Iniciando álbum {album.grouped_id} (posição {pos.original_index})")
-                                asyncio.create_task(self.send_worker(album, pos))
-                                break
-            
-            all_sent = all(pos.send_completed for pos in queue_positions.values())
-            if all_sent:
-                break
-                
-            await asyncio.sleep(0.3)
-
-    async def send_worker(self, album: AlbumInfo, position: QueuePosition):
-        """Worker para envio final do álbum"""
-        try:
-            async with self.send_lock:
-                self.send_active = None
-                position.send_completed = True
-            
-            self.logger.info(f"[ENVIO] Concluído álbum {album.grouped_id} (posição {position.original_index})")
-            
-            await self.cleanup_album_files(album)
-            
-        except Exception as e:
-            self.logger.error(f"[ENVIO] Erro no álbum {album.grouped_id}: {e}")
-            async with self.send_lock:
-                self.send_active = None
-
-    async def try_move_to_upload(self, album: AlbumInfo, position: QueuePosition):
-        """Tenta mover álbum para fila de upload, respeitando ordem cronológica"""
-        async with self.upload_lock:
-            if len(self.upload_active) < self.max_upload_queue:
-                can_move = True
-                for other_id, other_pos in [(aid, pos) for aid, pos in self.upload_queue]:
-                    if other_pos.original_index < position.original_index:
-                        can_move = False
-                        break
-                
-                if can_move:
-                    self.upload_queue.append((album.grouped_id, position))
-                    self.upload_active.add(album.grouped_id)
-                    position.upload_started = True
-                    self.logger.info(f"[UPLOAD] Movido para fila: álbum {album.grouped_id} (posição {position.original_index})")
-                    
-                    asyncio.create_task(self.upload_worker(album, position))
-                else:
-                    self.logger.info(f"[UPLOAD] Álbum {album.grouped_id} aguardando ordem (pos {position.original_index})")
-
-    async def try_move_to_send(self, album: AlbumInfo, position: QueuePosition):
-        """Tenta mover álbum para fila de envio (apenas 1 por vez, ordem rigorosa)"""
-        async with self.send_lock:
-            if self.send_active is None:
-                can_move = True
-                for other_pos in self.upload_queue:
-                    if other_pos[1].original_index < position.original_index and not other_pos[1].send_completed:
-                        can_move = False
-                        break
-                
-                if can_move:
-                    self.send_active = album.grouped_id
-                    self.logger.info(f"[ENVIO] Movido para fila: álbum {album.grouped_id} (posição {position.original_index})")
-                    
-                    asyncio.create_task(self.send_worker(album, position))
-
-
-class ProgressTracker:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self.init_database()
-
-    def init_database(self):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS albums (
-                    grouped_id INTEGER PRIMARY KEY,
-                    album_data TEXT,
-                    processed BOOLEAN DEFAULT 0,
-                    downloaded BOOLEAN DEFAULT 0,
-                    uploaded BOOLEAN DEFAULT 0,
-                    date_created TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS progress (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_albums_status ON albums(processed, downloaded, uploaded)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_albums_date ON albums(date_created)")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_progress_key ON progress(key)")
-
-    async def save_album(self, album: AlbumInfo):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO albums 
-                (grouped_id, album_data, processed, downloaded, uploaded, date_created)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                album.grouped_id,
-                json.dumps(asdict(album), default=str),
-                album.processed,
-                album.downloaded,
-                album.uploaded,
-                album.date.isoformat()
-            ))
-
-    async def save_albums_batch(self, albums: List[AlbumInfo]):
-        with sqlite3.connect(self.db_path) as conn:
-            data = [
-                (
-                    album.grouped_id,
-                    json.dumps(asdict(album), default=str),
-                    album.processed,
-                    album.downloaded,
-                    album.uploaded,
-                    album.date.isoformat()
-                )
-                for album in albums
-            ]
-            conn.executemany("""
-                INSERT OR REPLACE INTO albums 
-                (grouped_id, album_data, processed, downloaded, uploaded, date_created)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, data)
-
-    async def load_albums(self) -> Dict[int, AlbumInfo]:
-        albums = {}
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("""
-                SELECT album_data FROM albums 
-                ORDER BY date_created ASC
-            """)
-            for (album_data,) in cursor.fetchall():
-                try:
-                    data = json.loads(album_data)
-                    medias = []
-                    for media_data in data['medias']:
-                        media_data['date'] = datetime.fromisoformat(media_data['date'])
-                        medias.append(MediaInfo(**media_data))
-                    data['medias'] = medias
-                    data['date'] = datetime.fromisoformat(data['date'])
-                    album = AlbumInfo(**data)
-                    albums[album.grouped_id] = album
-                except Exception as e:
-                    logging.warning(f"Erro carregando álbum: {e}")
-                    continue
-        return albums
-
-    async def update_progress(self, key: str, value: str):
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO progress (key, value, updated_at)
-                VALUES (?, ?, CURRENT_TIMESTAMP)
-            """, (key, value))
-
-    async def get_progress(self, key: str) -> Optional[str]:
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT value FROM progress WHERE key = ?", (key,))
-            result = cursor.fetchone()
-            return result[0] if result else None
-
 
 async def main():
     """Função principal"""
@@ -879,7 +831,6 @@ async def main():
     except Exception as e:
         logging.error(f"Erro na transferência: {e}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
