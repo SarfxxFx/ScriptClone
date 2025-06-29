@@ -265,10 +265,17 @@ class TelegramAlbumTransfer:
             chat_info = await self.safe_telegram_call(self.client.get_entity, self.source_chat_id)
             self.logger.info(f"Chat: {getattr(chat_info, 'title', 'Chat privado')} (ID: {self.source_chat_id})")
             
-            # Corrigido: Aguardar a corrotina get_permissions
+            # Correção: Verificar permissões do chat de forma correta
             permissions = await self.client.get_permissions(self.source_chat_id)
-            if not permissions.read_messages:
-                raise Exception(f"Sem permissão para ler mensagens do chat {self.source_chat_id}")
+            if hasattr(permissions, 'view_messages') and not permissions.view_messages:
+                raise Exception(f"Sem permissão para ver mensagens do chat {self.source_chat_id}")
+            
+            # Tentar ler uma mensagem para verificar acesso
+            try:
+                async for message in self.client.iter_messages(self.source_chat_id, limit=1):
+                    break
+            except Exception as e:
+                raise Exception(f"Sem acesso para ler mensagens do chat {self.source_chat_id}: {str(e)}")
             
         except Exception as e:
             self.logger.error(f"Erro ao verificar chat de origem: {e}")
@@ -340,7 +347,7 @@ class TelegramAlbumTransfer:
         await self.process_messages_for_albums(all_messages)
         await self.progress_tracker.update_progress("last_processed_message", "completed")
         self.logger.info(f"Escaneamento concluído: {len(self.albums)} álbuns encontrados")
-        
+
     async def process_messages_for_albums(self, messages: List[Message]):
         self.logger.info(f"Processando {len(messages)} mensagens para identificar álbuns...")
         album_groups = defaultdict(list)
@@ -743,7 +750,7 @@ async def main():
         sys.exit(1)
 
 if __name__ == "__main__":
-    current_time = "2025-06-29 00:59:31"
+    current_time = "2025-06-29 01:01:32"
     current_user = "Clown171"
     
     print(f"""
