@@ -461,6 +461,7 @@ class TelegramAlbumTransfer:
     async def upload_manager(self, sorted_albums, queue_positions):
         albums_dict = {album.grouped_id: album for album in sorted_albums}
         upload_workers = {}
+        total_albuns = len(sorted_albums)
         while True:
             self.logger.info(f"[UPLOAD_MANAGER] upload_queue={list(self.upload_queue)} ativos={list(upload_workers.keys())}")
             ativos = [gid for gid in list(self.upload_queue)[:self.max_upload_queue]]
@@ -485,11 +486,13 @@ class TelegramAlbumTransfer:
                     self.upload_queue.popleft()
             # Remove workers finalizados
             upload_workers = {gid: w for gid, w in upload_workers.items() if not w.done()}
-            # Condição de parada: fila vazia e nenhum upload em andamento
-            if not self.upload_queue and not upload_workers:
+            # NOVO: Condição de parada robusta: só encerra quando TODOS os álbuns foram upados
+            all_completed = sum(1 for pos in queue_positions.values() if pos.upload_completed)
+            if all_completed == total_albuns:
+                self.logger.info("[UPLOAD_MANAGER] Todos os álbuns upados. Encerrando upload_manager.")
                 break
             await asyncio.sleep(0.25)
-            
+
     async def upload_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
             await self.upload_album_corrected(album)
@@ -503,24 +506,31 @@ class TelegramAlbumTransfer:
     async def send_manager(self, sorted_albums, queue_positions):
         albums_dict = {album.grouped_id: album for album in sorted_albums}
         send_workers = {}
+        total_albuns = len(sorted_albums)
         while True:
+            self.logger.info(f"[SEND_MANAGER] send_queue={list(self.send_queue)} ativos={list(send_workers.keys())}")
             if self.send_queue:
                 gid = self.send_queue[0]
-                pos = queue_positions[gid]
                 album = albums_dict[gid]
+                pos = queue_positions[gid]
+                self.logger.info(f"[SEND_MANAGER DEBUG] Album {gid} send_completed={pos.send_completed}")
                 if not pos.send_completed and gid not in send_workers:
+                    self.logger.info(f"[SEND] Iniciando álbum {gid} (posição {pos.original_index})")
                     worker = asyncio.create_task(self.send_worker(album, pos))
                     send_workers[gid] = worker
-            # Quando envio termina, retire da fila
+            # Remove workers finalizados e retire da fila de envio se já enviou
             for gid, worker in list(send_workers.items()):
                 if worker.done():
-                    self.logger.info(f"[PIPELINE] Álbum {gid} removido da fila de envio")
+                    self.logger.info(f"[SEND_MANAGER] Álbum {gid} enviado e removido da fila de envio")
                     self.send_queue.popleft()
                     del send_workers[gid]
-            if not self.send_queue and not send_workers:
+            # NOVO: Condição de parada robusta: só encerra quando TODOS os álbuns foram enviados
+            all_completed = sum(1 for pos in queue_positions.values() if pos.send_completed)
+            if all_completed == total_albuns:
+                self.logger.info("[SEND_MANAGER] Todos os álbuns enviados. Encerrando send_manager.")
                 break
             await asyncio.sleep(0.25)
-
+            
     async def send_worker(self, album: AlbumInfo, position: QueuePosition):
         try:
             position.send_completed = True
