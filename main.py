@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Versão otimizada do script de transferência de álbuns do Telegram.
-Sistema de 3 filas: Download (8), Upload (3), Envio (1), com ordem absoluta e sem ultrapassagem.
+Sistema de 3 filas: Download (10), Upload (10), Envio (10), com ordem absoluta e sem ultrapassagem.
 CORREÇÃO: Implementação rigorosa de ordem cronológica e priorização por ID.
 AGORA: Processa a partir da primeira mensagem definida por link, e todas as seguintes em ordem cronológica.
 Agrupamento corrigido: só álbuns reais pelo grouped_id podem ter múltiplas mídias (até 10). 
@@ -174,8 +174,8 @@ class TelegramAlbumTransfer:
                  source_chat_id: int,
                  target_chat_id: int,
                  temp_dir: str = "./temp_media",
-                 max_download_queue: int = 8,
-                 max_upload_queue: int = 3,
+                 max_download_queue: int = 10,
+                 max_upload_queue: int = 10,
                  progress_db: str = "./transfer_progress.db",
                  batch_size: int = 1000):
         self.client = TelegramClient(session_name, api_id, api_hash)
@@ -396,7 +396,7 @@ class TelegramAlbumTransfer:
         )
         total = len(sorted_albums)
         self.logger.info(f"Iniciando pipeline com {total} álbuns em ordem cronológica rigorosa")
-        self.logger.info("REGRAS: Download(8)->Upload(3)->Envio(1), SEM ultrapassagem")
+        self.logger.info("REGRAS: Download(10)->Upload(10)->Envio(1), SEM ultrapassagem")
         self.logger.info("Ordem: Timestamp -> Menor ID primeiro")
         queue_positions = {}
         for i, album in enumerate(sorted_albums):
@@ -657,7 +657,7 @@ class TelegramAlbumTransfer:
                 if not media.local_path or not os.path.exists(media.local_path):
                     raise Exception(f"Arquivo local não encontrado: {media.file_name}")
                 media_files.append(media.local_path)
-            caption = album.caption or f"Álbum transferido - {album.date.strftime('%Y-%m-%d %H:%M:%S')}"
+            caption = album.caption if album.caption else None
             await self.safe_telegram_call(
                 self.client.send_file,
                 self.target_chat_id,
@@ -703,8 +703,8 @@ async def main():
         session_name=SESSION_NAME,
         source_chat_id=SOURCE_CHAT_ID,
         target_chat_id=TARGET_CHAT_ID,
-        max_download_queue=8,
-        max_upload_queue=3,
+        max_download_queue=10,
+        max_upload_queue=10,
         temp_dir="./temp_media",
         progress_db="./transfer_progress.db"
     )
